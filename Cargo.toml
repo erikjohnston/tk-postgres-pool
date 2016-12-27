@@ -1,0 +1,11 @@
+[package]
+authors = ["Erik Johnston"]
+name = "tokio-postgres"
+version = "0.1.0"
+
+[dependencies]
+futures = "0.1.6"
+netbuf = "0.3.3"
+postgres-protocol = "0.1.1"
+tk-bufstream = "0.2.1"
+tokio-core = "0.1.1"
