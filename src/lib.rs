@@ -83,7 +83,7 @@ impl<T> ConnectionPool<T>
 
         let changed = match queue_receiver.poll() {
             Ok(Async::Ready(Some(query))) => {
-                // TODO: Launch new connections
+// TODO: Launch new connections
                 let mut conn = self.connections.pop_front().unwrap();
                 if let Ok(()) = conn.send_query(query) {
                     self.connections.push_back(conn);
@@ -124,4 +124,3 @@ impl<T: Io> Future for ConnectionPool<T>
         }
     }
 }
-

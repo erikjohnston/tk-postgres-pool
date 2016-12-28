@@ -1,29 +1,30 @@
+
+use Query;
 use futures;
-use tokio_core;
-use std;
 
 use futures::{Async, BoxFuture, Future, IntoFuture, Poll, Sink, future, task};
 use futures::stream::Stream;
 use futures::sync::mpsc::{Receiver, Sender, UnboundedSender};
+
+use linear_map::LinearMap;
 
 use pg::FrontendMessage;
 use postgres_protocol::authentication::md5_hash as postgres_md5_hash;
 use postgres_protocol::message::backend::Message as BackendMessage;
 use postgres_protocol::message::backend::ParseResult as BackendParseResult;
 use postgres_protocol::message::frontend as pg_frontend;
+use std;
 use std::collections::VecDeque;
 use std::io::{Cursor, ErrorKind, Read, Write};
 use std::io::Error as IoError;
 use std::mem;
 use std::sync::{Arc, Mutex};
-use tk_bufstream::{Buf, Decode, Encode, Framed, IoBuf};
-use tokio_core::io::Io;
-use tokio_core::net::TcpStream;
-
-use linear_map::LinearMap;
 
 use stream_fold::StreamForEach;
-use Query;
+use tk_bufstream::{Buf, Decode, Encode, Framed, IoBuf};
+use tokio_core;
+use tokio_core::io::Io;
+use tokio_core::net::TcpStream;
 
 
 pub struct PostgresCodec;
@@ -60,7 +61,7 @@ pub struct PostgresConnection<T> {
 }
 
 impl<T> PostgresConnection<T>
-    where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
+    where T: Sink<SinkItem = FrontendMessage, SinkError = IoError>
 {
     pub fn new(conn: T) -> PostgresConnection<T> {
         PostgresConnection {
@@ -79,8 +80,8 @@ impl<T> PostgresConnection<T>
     }
 
     pub fn accepting(&self) -> bool {
-// TODO: Handle slow queries
-// TODO: Make configurable
+        // TODO: Handle slow queries
+        // TODO: Make configurable
         self.queue.len() < 5 && self.transaction.is_none()
     }
 }
@@ -108,10 +109,10 @@ impl<T> Future for PostgresConnection<T>
                             self.queue.pop_front();
                         }
                         msg => {
-                            // TODO: Handle PortalSuspended.
-                            // TODO: Some things are not in response to
-                            // anything.
-                            // TODO: Check we have a sender...
+// TODO: Handle PortalSuspended.
+// TODO: Some things are not in response to
+// anything.
+// TODO: Check we have a sender...
                             let mut sender = &mut self.queue[0].sender;
                             sender.send(msg);
                         }
@@ -220,29 +221,29 @@ impl AuthParams {
                         AuthenticationOk => {
                             future::Either::A(Ok((true, conn)).into_future())
                         }
-                        AuthenticationGSS | AuthenticationKerberosV5
-                        | AuthenticationSCMCredential | AuthenticationSSPI => {
-                            let err = IoError::new(
-                                ErrorKind::Other,
-                                "Unsupported authentication type requested",
-                            );
+                        AuthenticationGSS |
+                        AuthenticationKerberosV5 |
+                        AuthenticationSCMCredential |
+                        AuthenticationSSPI => {
+                            let err = IoError::new(ErrorKind::Other,
+                                                   "Unsupported \
+                                                    authentication type \
+                                                    requested");
                             future::Either::A(Err(err).into_future())
                         }
                         ErrorResponse { fields } => {
-                            let map: LinearMap<_, _> = fields.into_iter().collect();
-                            let err = IoError::new(
-                                ErrorKind::Other,
-                                map[&b'M'].to_owned(),
-                            );
+                            let map: LinearMap<_, _> = fields.into_iter()
+                                .collect();
+                            let err = IoError::new(ErrorKind::Other,
+                                                   map[&b'M'].to_owned());
                             future::Either::A(Err(err).into_future())
                         }
                         _ => {
-                            let err = IoError::new(
-                                ErrorKind::Other,
-                                "Unexpected message from backend",
-                            );
+                            let err = IoError::new(ErrorKind::Other,
+                                                   "Unexpected message from \
+                                                    backend");
                             future::Either::A(Err(err).into_future())
-                        },
+                        }
                     }
                 })
             })
