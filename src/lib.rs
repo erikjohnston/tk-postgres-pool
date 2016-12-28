@@ -274,6 +274,26 @@ impl AuthParams {
         conn.send(buf)
             .and_then(move |conn| {
                 stream_fold::StreamForEach::new(conn, move |msg, conn: T| {
+                    // We lift this function up here so that we don't to
+                    // copy it.
+                    let send_password = move |password: &str, conn: T| {
+                        let mut buf = Vec::new();
+                        let res = pg_frontend::password_message(password,
+                                                                &mut buf);
+
+                        match res {
+                            Ok(()) => {
+                                let f = conn.send(buf);
+                                future::Either::B(
+                                    f.map(|conn| (false, conn))
+                                )
+                            }
+                            Err(e) => {
+                                future::Either::A(Err(e).into_future())
+                            }
+                        }
+                    };
+
                     use BackendMessage::*;
                     match msg {
                         AuthenticationMD5Password { salt } => {
@@ -282,22 +302,10 @@ impl AuthParams {
                                                   self.password.as_bytes(),
                                                   salt);
 
-                            let mut buf = Vec::new();
-
-                            let res = pg_frontend::password_message(&md5ed,
-                                                                    &mut buf);
-
-                            match res {
-                                Ok(()) => {
-                                    let f = conn.send(buf);
-                                    future::Either::B(
-                                        f.map(|conn| (false, conn))
-                                    )
-                                }
-                                Err(e) => {
-                                    future::Either::A(Err(e).into_future())
-                                }
-                            }
+                            send_password(&md5ed, conn)
+                        }
+                        AuthenticationCleartextPassword => {
+                            send_password(&self.password, conn)
                         }
                         AuthenticationOk => {
                             future::Either::A(Ok((true, conn)).into_future())
