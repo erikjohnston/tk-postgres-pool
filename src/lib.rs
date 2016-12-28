@@ -16,7 +16,6 @@ use postgres_protocol::authentication::md5_hash as postgres_md5_hash;
 use postgres_protocol::message::backend::Message as BackendMessage;
 use postgres_protocol::message::backend::ParseResult as BackendParseResult;
 use postgres_protocol::message::frontend as pg_frontend;
-use postgres_protocol::message::frontend::Message as FrontendMessage;
 use std::collections::VecDeque;
 use std::io::{Cursor, ErrorKind, Read, Write};
 use std::io::Error as IoError;
@@ -26,17 +25,22 @@ use tk_bufstream::{Buf, Decode, Encode, Framed, IoBuf};
 use tokio_core::io::Io;
 use tokio_core::net::TcpStream;
 
+use pg::FrontendMessage;
 
+
+mod pg;
 mod stream_fold;
 
 
 pub struct PostgresCodec;
 
 impl Encode for PostgresCodec {
-    type Item = Vec<u8>;
+    type Item = FrontendMessage;
 
-    fn encode(&mut self, value: Self::Item, buf: &mut Buf) {
-        buf.extend(&value);
+    fn encode(&mut self, item: Self::Item, buf: &mut Buf) {
+        let mut vec = Vec::new();
+        item.serialize(&mut vec).expect("serialize to work");
+        buf.extend(&vec);
     }
 }
 
@@ -62,7 +66,7 @@ struct PostgresConnection<T> {
 }
 
 impl<T> PostgresConnection<T>
-    where T: Sink<SinkItem=Vec<u8>, SinkError=IoError>
+    where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
         + Stream<Item=BackendMessage, Error=IoError>
 {
     fn new(conn: T) -> PostgresConnection<T> {
@@ -116,11 +120,15 @@ impl<T> PostgresConnection<T>
         // TODO: Make configurable
         self.queue.len() < 5 && self.transaction.is_none()
     }
+
+    fn into_inner(self) -> T {
+        self.raw_conn
+    }
 }
 
 
 struct Query {
-    data: Vec<u8>,
+    data: FrontendMessage,
     sender: UnboundedSender<BackendMessage>,
     retryable: bool,
 }
@@ -134,7 +142,7 @@ pub struct ConnectionPool<T> {
 }
 
 impl<T> ConnectionPool<T>
-    where T: Sink<SinkItem=Vec<u8>, SinkError=IoError>
+    where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
         + Stream<Item=BackendMessage, Error=IoError>
 {
     fn poll_new_connections(&mut self) -> bool {
@@ -183,7 +191,7 @@ impl<T> ConnectionPool<T>
 }
 
 impl<T: Io> Future for ConnectionPool<T>
-    where T: Sink<SinkItem=Vec<u8>, SinkError=IoError>
+    where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
         + Stream<Item=BackendMessage, Error=IoError>
 {
     type Item = ();
@@ -266,32 +274,23 @@ struct AuthParams {
 impl AuthParams {
     fn start<T>(self, conn: T)
         -> impl Future<Item = PostgresConnection<T>, Error = IoError>
-        where T: Sink<SinkItem=Vec<u8>, SinkError=IoError>
+        where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
             + Stream<Item=BackendMessage, Error=IoError>
     {
-        let mut buf = Vec::new();
-        pg_frontend::startup_message(None, &mut buf);
-        conn.send(buf)
+        let startup = FrontendMessage::StartupMessage {
+            parameters: vec![("user".into(), self.username.clone())],
+        };
+        conn.send(startup)
             .and_then(move |conn| {
                 stream_fold::StreamForEach::new(conn, move |msg, conn: T| {
                     // We lift this function up here so that we don't to
                     // copy it.
-                    let send_password = move |password: &str, conn: T| {
-                        let mut buf = Vec::new();
-                        let res = pg_frontend::password_message(password,
-                                                                &mut buf);
-
-                        match res {
-                            Ok(()) => {
-                                let f = conn.send(buf);
-                                future::Either::B(
-                                    f.map(|conn| (false, conn))
-                                )
-                            }
-                            Err(e) => {
-                                future::Either::A(Err(e).into_future())
-                            }
-                        }
+                    let send_password = move |password: String, conn: T| {
+                        let m = FrontendMessage::PasswordMessage { password: password };
+                        let f = conn.send(m);
+                        future::Either::B(
+                            f.map(|conn| (false, conn))
+                        )
                     };
 
                     use BackendMessage::*;
@@ -302,10 +301,10 @@ impl AuthParams {
                                                   self.password.as_bytes(),
                                                   salt);
 
-                            send_password(&md5ed, conn)
+                            send_password(md5ed, conn)
                         }
                         AuthenticationCleartextPassword => {
-                            send_password(&self.password, conn)
+                            send_password(self.password.clone(), conn)
                         }
                         AuthenticationOk => {
                             future::Either::A(Ok((true, conn)).into_future())
@@ -321,5 +320,154 @@ impl AuthParams {
                     Err(IoError::new(ErrorKind::UnexpectedEof, ""))
                 }
             })
+    }
+}
+
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    use std::collections::BTreeMap;
+    use futures::StartSend;
+    use futures::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded};
+
+
+    struct TestConnBacking {
+        pub output: UnboundedSender<BackendMessage>,
+        pub input: UnboundedReceiver<FrontendMessage>,
+    }
+
+    impl Stream for TestConnBacking {
+        type Item = FrontendMessage;
+        type Error = IoError;
+
+        fn poll(&mut self) -> Poll<Option<Self::Item>, IoError> {
+            self.input.poll()
+            .map_err(|_| panic!("Connection has dropped") )
+        }
+    }
+
+    impl TestConnBacking {
+        fn send_msg(&mut self, msg: BackendMessage) {
+            if let Err(e) = self.output.start_send(msg) {
+                println!("Failed to send msg, conn dropped.");
+            }
+        }
+    }
+
+    fn create_conn() -> (TestConn, TestConnBacking) {
+        let (input_sender, input_rc) = unbounded();
+        let (output_sender, output_rc) = unbounded();
+
+        let conn = TestConn {
+            output: output_rc,
+            input: input_sender,
+        };
+
+        let backing = TestConnBacking {
+            output: output_sender,
+            input: input_rc,
+        };
+
+        (conn, backing)
+    }
+
+    struct TestConn {
+        pub output: UnboundedReceiver<BackendMessage>,
+        pub input: UnboundedSender<FrontendMessage>,
+    }
+
+    impl Sink for TestConn {
+        type SinkItem = FrontendMessage;
+        type SinkError = IoError;
+
+        fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+            self.input.start_send(item)
+            .map_err(|_| panic!("") )
+        }
+
+        fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+            self.input.poll_complete()
+            .map_err(|_| panic!("") )
+        }
+    }
+
+    impl Stream for TestConn {
+        type Item = BackendMessage;
+        type Error = IoError;
+
+        fn poll(&mut self) -> Poll<Option<Self::Item>, IoError> {
+            self.output.poll()
+            .map_err(|_| panic!("") )
+        }
+    }
+
+    #[test]
+    fn test_startup_no_auth() {
+        futures::lazy(|| {
+            let auth_params = AuthParams {
+                username: "foo".into(),
+                password: "bar".into(),
+            };
+
+            let (conn, backing) = create_conn();
+            let client_startup_future = auth_params.start(conn);
+
+            let server_future = backing.into_future()
+                .and_then(|(item, mut backing)| {
+                    match item {
+                        Some(FrontendMessage::StartupMessage { parameters }) => {
+                            let parameters: BTreeMap<String, String> = parameters.into_iter().collect();
+                            assert_eq!(parameters["user"], "foo");
+                            println!("Got starup message");
+                        }
+                        _ => panic!("Expected startup message"),
+                    }
+                    backing.send_msg(BackendMessage::AuthenticationOk);
+                    Ok(())
+                })
+                .map_err(|(err, _)| err);
+            
+            server_future.join(client_startup_future)
+        }).wait().unwrap();
+    }
+
+    #[test]
+    fn test_startup_cleartext_auth() {
+        futures::lazy(|| {
+            let auth_params = AuthParams {
+                username: "foo".into(),
+                password: "bar".into(),
+            };
+
+            let (conn, backing) = create_conn();
+            let client_startup_future = auth_params.start(conn);
+
+            let server_future = backing.into_future()
+                .and_then(|(item, mut backing)| {
+                    match item {
+                        Some(FrontendMessage::StartupMessage { .. }) => {
+                            println!("Got starup message");
+                        }
+                        _ => panic!("Expected startup message"),
+                    }
+                    backing.send_msg(BackendMessage::AuthenticationCleartextPassword);
+                    backing.into_future()
+                })
+                .and_then(|(item, mut backing)| {
+                    match item {
+                        Some(FrontendMessage::PasswordMessage { password }) => {
+                            assert_eq!(&password, "bar");
+                            println!("Got password message");
+                        }
+                        _ => panic!("Expected password message"),
+                    }
+                    backing.send_msg(BackendMessage::AuthenticationOk);
+                    Ok(())
+                })
+                .map_err(|(err, _)| err);
+            
+            server_future.join(client_startup_future)
+        }).wait().unwrap();
     }
 }
