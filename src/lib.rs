@@ -9,7 +9,7 @@ extern crate postgres_protocol;
 extern crate tk_bufstream;
 
 
-use futures::{Async, BoxFuture, Future, Poll, task};
+use futures::{Async, BoxFuture, Future, Poll, task, Sink, future, IntoFuture};
 use futures::stream::Stream;
 use futures::sync::mpsc::{Receiver, Sender, UnboundedSender};
 use postgres_protocol::authentication::md5_hash as postgres_md5_hash;
@@ -23,68 +23,46 @@ use std::io::Error as IoError;
 use std::mem;
 use std::sync::{Arc, Mutex};
 use tk_bufstream::{Buf, Decode, Encode, Framed, IoBuf};
-use tokio_core::io::Io;
+use tokio_core::io::{Io};
 use tokio_core::net::TcpStream;
 
 
 mod stream_fold;
 
 
-struct RawPostgresConnection<T: Io> {
-    stream: IoBuf<T>,
-    temp_vec: Vec<u8>,
-}
+pub struct PostgresCodec;
 
-impl<T: Io> RawPostgresConnection<T> {
-    fn new(conn: T) -> RawPostgresConnection<T> {
-        RawPostgresConnection {
-            stream: IoBuf::new(conn),
-            temp_vec: Vec::new(),
-        }
-    }
+impl Encode for PostgresCodec {
+    type Item = Vec<u8>;
 
-    fn write(&mut self, buf: &[u8]) {
-        self.stream.out_buf.extend(buf);
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        self.stream.flush()
+    fn encode(&mut self, value: Self::Item, buf: &mut Buf) {
+        buf.extend(&value);
     }
 }
 
-impl<T: Io> Stream for RawPostgresConnection<T> {
+impl Decode for PostgresCodec {
     type Item = BackendMessage;
-    type Error = IoError;
 
-    fn poll(&mut self) -> Result<Async<Option<BackendMessage>>, IoError> {
-        loop {
-            match BackendMessage::parse(&self.stream.in_buf[..])? {
-                BackendParseResult::Complete { message, consumed } => {
-                    self.stream.in_buf.consume(consumed);
-                    return Ok(Async::Ready(Some(message)));
-                }
-                BackendParseResult::Incomplete { .. } => {
-                    if self.stream.read()? == 0 {
-                        if self.stream.done() {
-                            return Ok(Async::Ready(None));
-                        } else {
-                            return Ok(Async::NotReady);
-                        }
-                    }
-                }
+    fn decode(&mut self, buf: &mut Buf) -> Result<Option<Self::Item>, IoError> {
+        match BackendMessage::parse(buf.as_ref())? {
+            BackendParseResult::Complete { message, consumed } => {
+                buf.consume(consumed);
+                Ok(Some(message))
             }
+            BackendParseResult::Incomplete { .. } => Ok(None)
         }
     }
 }
 
-struct PostgresConnection<T: Io> {
-    raw_conn: RawPostgresConnection<T>,
+
+struct PostgresConnection<T> {
+    raw_conn: T,
     queue: VecDeque<Query>,
     transaction: Option<usize>,
 }
 
-impl<T: Io> PostgresConnection<T> {
-    fn new(conn: RawPostgresConnection<T>) -> PostgresConnection<T> {
+impl<T> PostgresConnection<T> where T: Sink<SinkItem=Vec<u8>, SinkError=IoError> + Stream<Item=BackendMessage, Error=IoError> {
+    fn new(conn: T) -> PostgresConnection<T> {
         PostgresConnection {
             raw_conn: conn,
             queue: VecDeque::new(),
@@ -92,8 +70,9 @@ impl<T: Io> PostgresConnection<T> {
         }
     }
 
-    fn handle_poll(&mut self) {
+    fn handle_poll(&mut self) -> Result<(), IoError> {
         loop {
+            self.raw_conn.poll_complete()?;
             match self.raw_conn.poll() {
                 Ok(Async::Ready(Some(msg))) => {
                     match msg {
@@ -111,23 +90,20 @@ impl<T: Io> PostgresConnection<T> {
                             // TODO: Some things are not in response to
                             // anything.
                             // TODO: Check we have a sender...
-                            let res = self.queue[0].sender.send(msg);
-                            if let Err(err) = res {
-                                // TODO: Need to stop sending to this
-                            }
+                            let mut sender = &mut self.queue[0].sender;
+                            sender.send(msg);
                         }
                     }
                 }
-                Ok(Async::NotReady) => return,
-                Ok(Async::Ready(None)) |
-                Err(_) => return, // TODO
+                Ok(Async::NotReady) => return Ok(()),
+                Ok(Async::Ready(None)) => return Ok(()),
+                Err(e) => return Err(e), // TODO
             }
         }
     }
 
     fn send_query(&mut self, query: Query) -> Result<(), IoError> {
-        self.raw_conn.write(&query.data);
-        self.raw_conn.flush()?;
+        self.raw_conn.start_send(query.data.clone());
         self.queue.push_back(query);
         Ok(())
     }
@@ -147,14 +123,14 @@ struct Query {
 }
 
 
-pub struct ConnectionPool<T: Io> {
+pub struct ConnectionPool<T> {
     connections: VecDeque<PostgresConnection<T>>,
     new_connections: Vec<Box<Future<Item = PostgresConnection<T>,
                                     Error = IoError>>>,
     queue_receiver: Option<Receiver<Query>>,
 }
 
-impl<T: Io> ConnectionPool<T> {
+impl<T> ConnectionPool<T> where T: Sink<SinkItem=Vec<u8>, SinkError=IoError> + Stream<Item=BackendMessage, Error=IoError> {
     fn poll_new_connections(&mut self) -> bool {
         let mut changed = false;
 
@@ -200,7 +176,7 @@ impl<T: Io> ConnectionPool<T> {
     }
 }
 
-impl<T: Io> Future for ConnectionPool<T> {
+impl<T: Io> Future for ConnectionPool<T> where T: Sink<SinkItem=Vec<u8>, SinkError=IoError> + Stream<Item=BackendMessage, Error=IoError> {
     type Item = ();
     type Error = ();
 
@@ -244,7 +220,7 @@ impl ConnectionFactory<tokio_core::net::TcpStream> for TcpConnectionFactory {
 }
 
 
-struct PostgresConnectionFactory<T: Io, CF: ConnectionFactory<T>> {
+struct PostgresConnectionFactory<T, CF: ConnectionFactory<T>> {
     conn_fac: CF,
     username: String,
     password: String,
@@ -252,58 +228,80 @@ struct PostgresConnectionFactory<T: Io, CF: ConnectionFactory<T>> {
 }
 
 impl<T: Io, CF: ConnectionFactory<T>> PostgresConnectionFactory<T, CF> {
-    fn connect
-        (&mut self)
-        -> impl Future<Item = PostgresConnection<T>, Error = IoError> {
-        let username = self.username.clone();
-        let password = self.password.clone();
+    fn connect(&mut self)
+        -> impl Future<Item = PostgresConnection<Framed<T, PostgresCodec>>, Error = IoError> {
+
+        let auth_params = AuthParams {
+            username: self.username.clone(),
+            password: self.password.clone(),
+        };
 
         self.conn_fac
             .connect()
             .and_then(move |conn| {
-                let mut pg_conn = RawPostgresConnection::new(conn);
-                let mut buf = Vec::new();
-                pg_frontend::startup_message(None, &mut buf)?;
-                pg_conn.write(&buf);
-                pg_conn.flush()?;
-
-                Ok(pg_conn)
+                let pg_conn = IoBuf::new(conn).framed(PostgresCodec);
+                
+                auth_params.start(pg_conn)
             })
-            .and_then(move |pg_conn| {
-                stream_fold::StreamForEach::new(
-                    pg_conn,
-                    move |msg, conn: &mut RawPostgresConnection<T>| {
-                        use BackendMessage::*;
-                        match msg {
-                            AuthenticationMD5Password { salt } => {
-                                let md5ed = postgres_md5_hash(
-                                    username.as_bytes(),
-                                    password.as_bytes(),
-                                    salt,
-                                );
+    }
+}
 
-                                let mut buf = Vec::new();
-                                pg_frontend::password_message(
-                                    &md5ed,
-                                    &mut buf,
-                                )?;
-                                conn.write(&buf);
-                                conn.flush()?;
 
-                                Ok(false)
+
+struct AuthParams {
+    username: String,
+    password: String,
+}
+
+impl AuthParams {
+    fn start<T>(self, conn: T) -> impl Future<Item = PostgresConnection<T>, Error = IoError> where T: Sink<SinkItem=Vec<u8>, SinkError=IoError> + Stream<Item=BackendMessage, Error=IoError> { 
+        let mut buf = Vec::new();
+        pg_frontend::startup_message(None, &mut buf);
+        conn.send(buf)
+        .and_then(move |conn| {
+            stream_fold::StreamForEach::new(
+                conn,
+                move |msg, conn: T| {
+                    use BackendMessage::*;
+                    match msg {
+                        AuthenticationMD5Password { salt } => {
+                            let md5ed = postgres_md5_hash(
+                                self.username.as_bytes(),
+                                self.password.as_bytes(),
+                                salt,
+                            );
+
+                            let mut buf = Vec::new();
+                            
+                            let res = pg_frontend::password_message(
+                                &md5ed,
+                                &mut buf,
+                            );
+
+                            match res {
+                                Ok(()) => {
+                                    let f = conn.send(buf);
+                                    future::Either::B(f.map(|conn| (false, conn)))
+                                },
+                                Err(e) => future::Either::A(
+                                    Err(e).into_future()
+                                ),
                             }
-                            AuthenticationOk => Ok(true),
-                            _ => panic!(""), // TODO
                         }
+                        AuthenticationOk => future::Either::A(
+                            Ok((true, conn)).into_future()
+                        ),
+                        _ => panic!(""), // TODO
                     }
-                )
-            })
-            .and_then(move |pg_conn| {
-                if let Some(conn) = pg_conn {
-                    Ok(PostgresConnection::new(conn))
-                } else {
-                    Err(IoError::new(ErrorKind::UnexpectedEof, ""))
                 }
-            })
+            )
+        })
+        .and_then(move |conn| {
+            if let Some(conn) = conn {
+                Ok(PostgresConnection::new(conn))
+            } else {
+                Err(IoError::new(ErrorKind::UnexpectedEof, ""))
+            }
+        })
     }
 }

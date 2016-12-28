@@ -4,7 +4,7 @@ name = "tokio-postgres"
 version = "0.1.0"
 
 [dependencies]
-futures = "0.1.6"
+futures = "0.1.7"
 netbuf = "0.3.3"
 postgres-protocol = "0.1.1"
 tk-bufstream = "0.2.1"
