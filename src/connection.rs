@@ -1,4 +1,3 @@
-
 use Query;
 use futures;
 
@@ -73,7 +72,7 @@ impl<T> PostgresConnection<T>
 
     pub fn send_query(&mut self, query: Query) -> Result<(), IoError> {
         for msg in &query.data {
-            self.raw_conn.start_send(msg.clone());
+            self.raw_conn.start_send(msg.clone())?;
         }
         self.queue.push_back(query);
         Ok(())
@@ -108,19 +107,39 @@ impl<T> Future for PostgresConnection<T>
                             }
                             self.queue.pop_front();
                         }
+                        BackendMessage::PortalSuspended { .. } => {
+                            return Err(IoError::new(
+                                ErrorKind::Other,
+                                "Unexpected Portal Suspended message"
+                            ));
+                        }
+                        BackendMessage::ParameterStatus { .. } => {}
                         msg => {
-// TODO: Handle PortalSuspended.
-// TODO: Some things are not in response to
-// anything.
-// TODO: Check we have a sender...
-                            let mut sender = &mut self.queue[0].sender;
-                            sender.send(msg);
+                            let is_ready = if let BackendMessage::ReadyForQuery { .. } = msg {
+                                true
+                            } else {
+                                false
+                            };
+
+                            if let Some(query) = self.queue.front_mut() {
+                                let sender = &mut query.sender;
+                                sender.send(msg).ok();
+                                // We don't care if the other side has gone away.
+                            } else {
+                                // TODO: Something has probably gone wrong, unless
+                                // its a NoticeMessage or something like that.
+                            }
+
+                            if is_ready {
+                                // TODO: Handle if we don't have anything to pop.
+                                self.queue.pop_front();
+                            }
                         }
                     }
                 }
                 Ok(Async::NotReady) => return Ok(Async::NotReady),
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
-                Err(e) => return Err(e), // TODO
+                Err(e) => return Err(e), // TODO: Clean up pending queries
             }
         }
     }
