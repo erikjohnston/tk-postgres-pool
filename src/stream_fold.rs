@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::{Async, Future, Poll, IntoFuture};
+use futures::{Async, Future, IntoFuture, Poll};
 use futures::stream::Stream;
 
 use std::mem;
@@ -22,12 +22,16 @@ use std::mem;
 /// the stream to build up an object, but then returns both the object
 /// *and* the stream.
 #[must_use = "futures do nothing unless polled"]
-pub struct StreamForEach<S, F, U> where U: IntoFuture {
+pub struct StreamForEach<S, F, U>
+    where U: IntoFuture
+{
     func: F,
     state: State<S, U>,
 }
 
-impl<S, F, U> StreamForEach<S, F, U> where U: IntoFuture {
+impl<S, F, U> StreamForEach<S, F, U>
+    where U: IntoFuture
+{
     pub fn new(stream: S, func: F) -> StreamForEach<S, F, U> {
         StreamForEach {
             func: func,
@@ -36,17 +40,18 @@ impl<S, F, U> StreamForEach<S, F, U> where U: IntoFuture {
     }
 }
 
-enum State<S, U> where U: IntoFuture {
+enum State<S, U>
+    where U: IntoFuture
+{
     Empty,
     Future(U::Future),
     Stream(S),
 }
 
-impl<I, E, S, F, U> Future
-    for StreamForEach<S, F, U>
+impl<I, E, S, F, U> Future for StreamForEach<S, F, U>
     where S: Stream<Item = I, Error = E>,
-        F: FnMut(I, S) -> U,
-        U: IntoFuture<Item=(bool, S), Error=E>,
+          F: FnMut(I, S) -> U,
+          U: IntoFuture<Item = (bool, S), Error = E>
 {
     type Item = Option<S>;
     type Error = E;
@@ -64,7 +69,7 @@ impl<I, E, S, F, U> Future
                 };
 
                 (self.func)(item, stream).into_future()
-            } 
+            }
             State::Future(future) => future,
         };
 
