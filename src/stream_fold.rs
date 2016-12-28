@@ -50,8 +50,8 @@ impl<I, E, S, F, U> Future for StreamForEach<S, F, U>
                     Async::Ready(None) => return Ok(Async::Ready(None)),
                     Async::NotReady => {
                         self.state = State::Stream(stream);
-                        return Ok(Async::NotReady)
-                    },
+                        return Ok(Async::NotReady);
+                    }
                 };
 
                 (self.func)(item, stream).into_future()

@@ -12,6 +12,8 @@ extern crate tk_bufstream;
 use futures::{Async, BoxFuture, Future, IntoFuture, Poll, Sink, future, task};
 use futures::stream::Stream;
 use futures::sync::mpsc::{Receiver, Sender, UnboundedSender};
+
+use pg::FrontendMessage;
 use postgres_protocol::authentication::md5_hash as postgres_md5_hash;
 use postgres_protocol::message::backend::Message as BackendMessage;
 use postgres_protocol::message::backend::ParseResult as BackendParseResult;
@@ -24,8 +26,6 @@ use std::sync::{Arc, Mutex};
 use tk_bufstream::{Buf, Decode, Encode, Framed, IoBuf};
 use tokio_core::io::Io;
 use tokio_core::net::TcpStream;
-
-use pg::FrontendMessage;
 
 
 mod pg;
@@ -92,11 +92,11 @@ impl<T> PostgresConnection<T>
                             }
                             self.queue.pop_front();
                         }
-                        // TODO: Handle PortalSuspended.
+// TODO: Handle PortalSuspended.
                         msg => {
-                            // TODO: Some things are not in response to
-                            // anything.
-                            // TODO: Check we have a sender...
+// TODO: Some things are not in response to
+// anything.
+// TODO: Check we have a sender...
                             let mut sender = &mut self.queue[0].sender;
                             sender.send(msg);
                         }
@@ -116,8 +116,8 @@ impl<T> PostgresConnection<T>
     }
 
     fn accepting(&self) -> bool {
-        // TODO: Handle slow queries
-        // TODO: Make configurable
+// TODO: Handle slow queries
+// TODO: Make configurable
         self.queue.len() < 5 && self.transaction.is_none()
     }
 
@@ -173,7 +173,7 @@ impl<T> ConnectionPool<T>
 
         let changed = match queue_receiver.poll() {
             Ok(Async::Ready(Some(query))) => {
-                // TODO: Stuff
+// TODO: Stuff
                 let mut conn = self.connections.pop_front().unwrap();
                 if let Ok(()) = conn.send_query(query) {
                     self.connections.push_back(conn);
@@ -207,7 +207,7 @@ impl<T: Io> Future for ConnectionPool<T>
                        self.new_connections.is_empty();
 
         if finished {
-            // TODO: Reject all pending queries?
+// TODO: Reject all pending queries?
             Ok(Async::Ready(()))
         } else {
             Ok(Async::NotReady)
@@ -286,11 +286,11 @@ impl AuthParams {
                     // We lift this function up here so that we don't to
                     // copy it.
                     let send_password = move |password: String, conn: T| {
-                        let m = FrontendMessage::PasswordMessage { password: password };
+                        let m = FrontendMessage::PasswordMessage {
+                            password: password,
+                        };
                         let f = conn.send(m);
-                        future::Either::B(
-                            f.map(|conn| (false, conn))
-                        )
+                        future::Either::B(f.map(|conn| (false, conn)))
                     };
 
                     use BackendMessage::*;
@@ -325,11 +325,11 @@ impl AuthParams {
 
 
 #[cfg(test)]
-mod tests{
-    use super::*;
-    use std::collections::BTreeMap;
+mod tests {
     use futures::StartSend;
-    use futures::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded};
+    use futures::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+    use std::collections::BTreeMap;
+    use super::*;
 
 
     struct TestConnBacking {
@@ -342,8 +342,9 @@ mod tests{
         type Error = IoError;
 
         fn poll(&mut self) -> Poll<Option<Self::Item>, IoError> {
-            self.input.poll()
-            .map_err(|_| panic!("Connection has dropped") )
+            self.input
+                .poll()
+                .map_err(|_| panic!("Connection has dropped"))
         }
     }
 
@@ -381,14 +382,19 @@ mod tests{
         type SinkItem = FrontendMessage;
         type SinkError = IoError;
 
-        fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-            self.input.start_send(item)
-            .map_err(|_| panic!("") )
+        fn start_send(
+            &mut self,
+            item: Self::SinkItem
+        ) -> StartSend<Self::SinkItem, Self::SinkError> {
+            self.input
+                .start_send(item)
+                .map_err(|_| panic!(""))
         }
 
         fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-            self.input.poll_complete()
-            .map_err(|_| panic!("") )
+            self.input
+                .poll_complete()
+                .map_err(|_| panic!(""))
         }
     }
 
@@ -397,8 +403,9 @@ mod tests{
         type Error = IoError;
 
         fn poll(&mut self) -> Poll<Option<Self::Item>, IoError> {
-            self.output.poll()
-            .map_err(|_| panic!("") )
+            self.output
+                .poll()
+                .map_err(|_| panic!(""))
         }
     }
 
@@ -427,7 +434,7 @@ mod tests{
                     Ok(())
                 })
                 .map_err(|(err, _)| err);
-            
+
             server_future.join(client_startup_future)
         }).wait().unwrap();
     }
@@ -466,7 +473,7 @@ mod tests{
                     Ok(())
                 })
                 .map_err(|(err, _)| err);
-            
+
             server_future.join(client_startup_future)
         }).wait().unwrap();
     }
