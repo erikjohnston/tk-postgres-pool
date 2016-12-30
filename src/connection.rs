@@ -56,6 +56,7 @@ impl Decode for PostgresCodec {
 pub struct PostgresConnection<T> {
     raw_conn: T,
     queue: VecDeque<Query>,
+    resyncing: bool,
     transaction: Option<usize>,
 }
 
@@ -67,6 +68,7 @@ impl<T> PostgresConnection<T>
             raw_conn: conn,
             queue: VecDeque::new(),
             transaction: None,
+            resyncing: false,
         }
     }
 
@@ -76,12 +78,6 @@ impl<T> PostgresConnection<T>
         }
         self.queue.push_back(query);
         Ok(())
-    }
-
-    pub fn accepting(&self) -> bool {
-        // TODO: Handle slow queries
-        // TODO: Make configurable
-        self.queue.len() < 5 && self.transaction.is_none()
     }
 }
 
@@ -98,15 +94,6 @@ impl<T> Future for PostgresConnection<T>
             match self.raw_conn.poll() {
                 Ok(Async::Ready(Some(msg))) => {
                     match msg {
-                        BackendMessage::ReadyForQuery { state } => {
-                            match state {
-                                b'I' => {}
-                                b'T' => {} // TODO: Ensure we're in txn.
-                                b'E' => {} // TODO
-                                _ => panic!("Unexpected state from PG"), // TODO
-                            }
-                            self.queue.pop_front();
-                        }
                         BackendMessage::PortalSuspended { .. } => {
                             return Err(IoError::new(
                                 ErrorKind::Other,
@@ -115,22 +102,36 @@ impl<T> Future for PostgresConnection<T>
                         }
                         BackendMessage::ParameterStatus { .. } => {}
                         msg => {
-                            let is_ready = if let BackendMessage::ReadyForQuery { .. } = msg {
+                            // Work out if the current 'Query' is finished.
+                            let is_finished = if let BackendMessage::ReadyForQuery { state } = msg {
+                                match state {
+                                    b'I' => {}
+                                    b'T' => {} // TODO: Ensure we're in txn.
+                                    b'E' => {} // TODO
+                                    _ => panic!("Unexpected state from PG"), // TODO
+                                }
+
                                 true
                             } else {
                                 false
                             };
 
-                            if let Some(query) = self.queue.front_mut() {
-                                let sender = &mut query.sender;
-                                sender.send(msg).ok();
-                                // We don't care if the other side has gone away.
-                            } else {
-                                // TODO: Something has probably gone wrong, unless
-                                // its a NoticeMessage or something like that.
+                            // If we're resyncing we wait until the next ReadyForQuery message.
+                            if !self.resyncing {
+                                if let Some(query) = self.queue.front_mut() {
+                                    let sender = &mut query.sender;
+                                    if let Err(_) = sender.send(msg) {
+                                        // The other side has gone away, mark us as resyncing.
+                                        self.resyncing = true;
+                                    }
+                                } else {
+                                    // TODO: Something has probably gone wrong, unless
+                                    // its a NoticeMessage or something like that.
+                                }
                             }
 
-                            if is_ready {
+                            if is_finished {
+                                self.resyncing = false;
                                 // TODO: Handle if we don't have anything to pop.
                                 self.queue.pop_front();
                             }
@@ -303,7 +304,7 @@ mod tests {
 
     impl TestConnBacking {
         fn send_msg(&mut self, msg: BackendMessage) {
-            if let Err(e) = self.output.start_send(msg) {
+            if let Err(_) = self.output.start_send(msg) {
                 println!("Failed to send msg, conn dropped.");
             }
         }
