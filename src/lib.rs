@@ -32,6 +32,7 @@ use tokio_core::net::TcpStream;
 mod pg;
 mod stream_fold;
 mod connection;
+mod vec_stream;
 
 
 use connection::PostgresConnection;
