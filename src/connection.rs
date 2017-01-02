@@ -120,10 +120,7 @@ impl<T> Future for PostgresConnection<T>
                             if !self.resyncing {
                                 if let Some(query) = self.queue.front_mut() {
                                     let sender = &mut query.sender;
-                                    if let Err(_) = sender.send(msg) {
-                                        // The other side has gone away, mark us as resyncing.
-                                        self.resyncing = true;
-                                    }
+                                    sender.send(msg);
                                 } else {
                                     // TODO: Something has probably gone wrong, unless
                                     // its a NoticeMessage or something like that.
@@ -133,7 +130,9 @@ impl<T> Future for PostgresConnection<T>
                             if is_finished {
                                 self.resyncing = false;
                                 // TODO: Handle if we don't have anything to pop.
-                                self.queue.pop_front();
+                                if let Some(mut query) = self.queue.pop_front() {
+                                    query.sender.close();
+                                }
                             }
                         }
                     }

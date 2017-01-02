@@ -36,11 +36,12 @@ mod vec_stream;
 
 
 use connection::PostgresConnection;
+use vec_stream::VecStreamSender;
 
 
 pub struct Query {
     data: Vec<FrontendMessage>,
-    sender: UnboundedSender<BackendMessage>,
+    sender: VecStreamSender<BackendMessage, ()>,
     retryable: bool,
 }
 
