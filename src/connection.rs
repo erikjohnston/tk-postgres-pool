@@ -53,7 +53,7 @@ impl Decode for PostgresCodec {
 }
 
 
-pub trait PostgresConnection: Future<Item=(), Error=IoError> {
+pub trait PostgresConnection: Future<Item = (), Error = IoError> {
     fn send_query(&mut self, query: Query) -> Result<(), IoError>;
     fn pending_queries(&self) -> usize;
 }
@@ -74,6 +74,54 @@ impl<T> IoPostgresConnection<T> {
             transaction: None,
             resyncing: false,
         }
+    }
+
+    fn handle_msg(&mut self, msg: BackendMessage) -> Result<(), IoError> {
+        match msg {
+            BackendMessage::PortalSuspended { .. } => {
+                return Err(IoError::new(ErrorKind::Other,
+                                        "Unexpected Portal Suspended message"));
+            }
+            BackendMessage::ParameterStatus { .. } => {}
+            msg => {
+                // Work out if the current 'Query' is finished.
+                let is_finished =
+                    if let BackendMessage::ReadyForQuery { state } = msg {
+                        match state {
+                            b'I' => {}
+                            b'T' => {} // TODO: Ensure we're in txn.
+                            b'E' => {} // TODO
+                            _ => panic!("Unexpected state from PG"), // TODO
+                        }
+
+                        true
+                    } else {
+                        false
+                    };
+
+                // If we're resyncing we wait until the next ReadyForQuery
+                // message.
+                if !self.resyncing {
+                    if let Some(query) = self.queue.front_mut() {
+                        let sender = &mut query.sender;
+                        sender.send(msg);
+                    } else {
+                        // TODO: Something has probably gone wrong, unless
+                        // its a NoticeMessage or something like that.
+                    }
+                }
+
+                if is_finished {
+                    self.resyncing = false;
+                    // TODO: Handle if we don't have anything to pop.
+                    if let Some(mut query) = self.queue.pop_front() {
+                        query.sender.close();
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -106,49 +154,7 @@ impl<T> Future for IoPostgresConnection<T>
             self.raw_conn.poll_complete()?;
             match self.raw_conn.poll() {
                 Ok(Async::Ready(Some(msg))) => {
-                    match msg {
-                        BackendMessage::PortalSuspended { .. } => {
-                            return Err(IoError::new(
-                                ErrorKind::Other,
-                                "Unexpected Portal Suspended message"
-                            ));
-                        }
-                        BackendMessage::ParameterStatus { .. } => {}
-                        msg => {
-// Work out if the current 'Query' is finished.
-                            let is_finished = if let BackendMessage::ReadyForQuery { state } = msg {
-                                match state {
-                                    b'I' => {}
-                                    b'T' => {} // TODO: Ensure we're in txn.
-                                    b'E' => {} // TODO
-                                    _ => panic!("Unexpected state from PG"), // TODO
-                                }
-
-                                true
-                            } else {
-                                false
-                            };
-
-// If we're resyncing we wait until the next ReadyForQuery message.
-                            if !self.resyncing {
-                                if let Some(query) = self.queue.front_mut() {
-                                    let sender = &mut query.sender;
-                                    sender.send(msg);
-                                } else {
-// TODO: Something has probably gone wrong, unless
-// its a NoticeMessage or something like that.
-                                }
-                            }
-
-                            if is_finished {
-                                self.resyncing = false;
-// TODO: Handle if we don't have anything to pop.
-                                if let Some(mut query) = self.queue.pop_front() {
-                                    query.sender.close();
-                                }
-                            }
-                        }
-                    }
+                    self.handle_msg(msg)?;
                 }
                 Ok(Async::NotReady) => return Ok(Async::NotReady),
                 Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
@@ -189,7 +195,11 @@ pub struct IoPostgresConnectionFactory<C> {
     password: String,
 }
 
-impl<C> ConnectionFactory for IoPostgresConnectionFactory<C> where C: ConnectionFactory, C::Item: Io + 'static, C::Future: 'static {
+impl<C> ConnectionFactory for IoPostgresConnectionFactory<C>
+    where C: ConnectionFactory,
+          C::Item: Io + 'static,
+          C::Future: 'static
+{
     type Item = IoPostgresConnection<Framed<C::Item, PostgresCodec>>;
     type Future = Box<Future<Item = Self::Item, Error = IoError>>;
 

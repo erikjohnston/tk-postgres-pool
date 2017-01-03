@@ -35,7 +35,8 @@ mod connection;
 mod vec_stream;
 
 
-use connection::{ConnectionFactory, PostgresConnection, IoPostgresConnectionFactory};
+use connection::{ConnectionFactory, IoPostgresConnectionFactory,
+                 PostgresConnection};
 use vec_stream::VecStreamSender;
 
 
@@ -54,7 +55,9 @@ pub struct ConnectionPool<C: ConnectionFactory> {
     connection_factory: C,
 }
 
-impl<C> ConnectionPool<C> where C: ConnectionFactory, C::Item: PostgresConnection
+impl<C> ConnectionPool<C>
+    where C: ConnectionFactory,
+          C::Item: PostgresConnection
 {
     fn poll_new_connections(&mut self) -> bool {
         let mut changed = false;
@@ -119,7 +122,8 @@ impl<C> ConnectionPool<C> where C: ConnectionFactory, C::Item: PostgresConnectio
 
         self.connections.sort_by_key(|conn| !conn.pending_queries());
         // TODO: Make '5' configurable.
-        let pos_opt = self.connections.iter().position(|conn| conn.pending_queries() < 5);
+        let pos_opt =
+            self.connections.iter().position(|conn| conn.pending_queries() < 5);
         if let Some(pos) = pos_opt {
             let mut conn = self.connections.swap_remove(pos);
             match conn.send_query(query) {
@@ -138,16 +142,16 @@ impl<C> ConnectionPool<C> where C: ConnectionFactory, C::Item: PostgresConnectio
 }
 
 impl<C> Future for ConnectionPool<C>
-    where C: ConnectionFactory, C::Item: PostgresConnection
+    where C: ConnectionFactory,
+          C::Item: PostgresConnection
 {
     type Item = ();
     type Error = ();
 
     fn poll(&mut self) -> Result<Async<()>, ()> {
         while {
-            self.poll_receiver()
-            || self.poll_new_connections()
-            || self.poll_open_connetions()
+            self.poll_receiver() || self.poll_new_connections() ||
+            self.poll_open_connetions()
         } {}
 
         let finished = self.queue_receiver.is_none() &&
@@ -155,7 +159,7 @@ impl<C> Future for ConnectionPool<C>
                        self.new_connections.is_empty();
 
         if finished {
-// TODO: Reject all pending queries?
+            // TODO: Reject all pending queries?
             Ok(Async::Ready(()))
         } else {
             Ok(Async::NotReady)
