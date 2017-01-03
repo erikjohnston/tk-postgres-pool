@@ -102,7 +102,7 @@ impl<T> Future for PostgresConnection<T>
                         }
                         BackendMessage::ParameterStatus { .. } => {}
                         msg => {
-                            // Work out if the current 'Query' is finished.
+// Work out if the current 'Query' is finished.
                             let is_finished = if let BackendMessage::ReadyForQuery { state } = msg {
                                 match state {
                                     b'I' => {}
@@ -116,20 +116,20 @@ impl<T> Future for PostgresConnection<T>
                                 false
                             };
 
-                            // If we're resyncing we wait until the next ReadyForQuery message.
+// If we're resyncing we wait until the next ReadyForQuery message.
                             if !self.resyncing {
                                 if let Some(query) = self.queue.front_mut() {
                                     let sender = &mut query.sender;
                                     sender.send(msg);
                                 } else {
-                                    // TODO: Something has probably gone wrong, unless
-                                    // its a NoticeMessage or something like that.
+// TODO: Something has probably gone wrong, unless
+// its a NoticeMessage or something like that.
                                 }
                             }
 
                             if is_finished {
                                 self.resyncing = false;
-                                // TODO: Handle if we don't have anything to pop.
+// TODO: Handle if we don't have anything to pop.
                                 if let Some(mut query) = self.queue.pop_front() {
                                     query.sender.close();
                                 }
@@ -365,45 +365,50 @@ mod tests {
     #[test]
     fn test_startup_no_auth() {
         futures::lazy(|| {
-            let auth_params = AuthParams {
-                username: "foo".into(),
-                password: "bar".into(),
-            };
+                let auth_params = AuthParams {
+                    username: "foo".into(),
+                    password: "bar".into(),
+                };
 
-            let (conn, backing) = create_conn();
-            let client_startup_future = auth_params.start(conn);
+                let (conn, backing) = create_conn();
+                let client_startup_future = auth_params.start(conn);
 
-            let server_future = backing.into_future()
-                .and_then(|(item, mut backing)| {
-                    match item {
-                        Some(FrontendMessage::StartupMessage { parameters }) => {
-                            let parameters: BTreeMap<String, String> = parameters.into_iter().collect();
-                            assert_eq!(parameters["user"], "foo");
-                            println!("Got starup message");
+                let server_future = backing.into_future()
+                    .and_then(|(item, mut backing)| {
+                        match item {
+                            Some(FrontendMessage::StartupMessage {
+                                parameters
+                            }) => {
+                                let parameters: BTreeMap<String, String>
+                                    = parameters.into_iter().collect();
+                                assert_eq!(parameters["user"], "foo");
+                                println!("Got starup message");
+                            }
+                            _ => panic!("Expected startup message"),
                         }
-                        _ => panic!("Expected startup message"),
-                    }
-                    backing.send_msg(BackendMessage::AuthenticationOk);
-                    Ok(())
-                })
-                .map_err(|(err, _)| err);
+                        backing.send_msg(BackendMessage::AuthenticationOk);
+                        Ok(())
+                    })
+                    .map_err(|(err, _)| err);
 
-            server_future.join(client_startup_future)
-        }).wait().unwrap();
+                server_future.join(client_startup_future)
+            })
+            .wait()
+            .unwrap();
     }
 
     #[test]
     fn test_startup_cleartext_auth() {
         futures::lazy(|| {
-            let auth_params = AuthParams {
-                username: "foo".into(),
-                password: "bar".into(),
-            };
+                let auth_params = AuthParams {
+                    username: "foo".into(),
+                    password: "bar".into(),
+                };
 
-            let (conn, backing) = create_conn();
-            let client_startup_future = auth_params.start(conn);
+                let (conn, backing) = create_conn();
+                let client_startup_future = auth_params.start(conn);
 
-            let server_future = backing.into_future()
+                let server_future = backing.into_future()
                 .and_then(|(item, mut backing)| {
                     match item {
                         Some(FrontendMessage::StartupMessage { .. }) => {
@@ -411,7 +416,9 @@ mod tests {
                         }
                         _ => panic!("Expected startup message"),
                     }
-                    backing.send_msg(BackendMessage::AuthenticationCleartextPassword);
+                    backing.send_msg(
+                        BackendMessage::AuthenticationCleartextPassword
+                    );
                     backing.into_future()
                 })
                 .and_then(|(item, mut backing)| {
@@ -427,7 +434,9 @@ mod tests {
                 })
                 .map_err(|(err, _)| err);
 
-            server_future.join(client_startup_future)
-        }).wait().unwrap();
+                server_future.join(client_startup_future)
+            })
+            .wait()
+            .unwrap();
     }
 }

@@ -1,9 +1,8 @@
-
+use futures::{Async, Poll, Stream, task};
+use futures::task::Task;
 use std::collections::VecDeque;
 use std::mem;
 use std::sync::{Arc, Mutex};
-use futures::{Async, Poll, Stream, task};
-use futures::task::Task;
 
 struct VecStreamInner<T, E> {
     task: Option<Task>,
@@ -14,9 +13,7 @@ impl<T, E> VecStreamInner<T, E> {
     fn new() -> VecStreamInner<T, E> {
         VecStreamInner {
             task: None,
-            state: State::Items {
-                queue: VecDeque::new(),
-            }
+            state: State::Items { queue: VecDeque::new() },
         }
     }
 }
@@ -48,7 +45,7 @@ impl<T, E> Stream for VecStreamReceiver<T, E> {
             State::Items { mut queue } => {
                 let front = queue.pop_front();
                 inner.state = State::Items { queue: queue };
-                
+
                 if let Some(item) = front {
                     Ok(Async::Ready(Some(item)))
                 } else {
@@ -88,7 +85,9 @@ impl<T, E> VecStreamSender<T, E> {
         let mut inner = self.inner.lock().expect("mutext was poisoned");
 
         match inner.state {
-            State::Items { .. } => inner.state = State::Errored { error: error },
+            State::Items { .. } => {
+                inner.state = State::Errored { error: error }
+            }
             _ => {}
         }
     }
@@ -104,16 +103,14 @@ impl<T, E> VecStreamSender<T, E> {
 }
 
 
-pub fn create_stream<T, E>() -> (VecStreamSender<T, E>, VecStreamReceiver<T,E>) {
+pub fn create_stream<T, E>
+    ()
+    -> (VecStreamSender<T, E>, VecStreamReceiver<T, E>) {
     let inner = Arc::new(Mutex::new(VecStreamInner::new()));
 
-    let sender = VecStreamSender {
-        inner: inner.clone(),
-    };
+    let sender = VecStreamSender { inner: inner.clone() };
 
-    let receiver = VecStreamReceiver {
-        inner: inner,
-    };
+    let receiver = VecStreamReceiver { inner: inner };
 
     (sender, receiver)
 }
@@ -121,33 +118,35 @@ pub fn create_stream<T, E>() -> (VecStreamSender<T, E>, VecStreamReceiver<T,E>) 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures;
     use futures::{Future, Stream};
+    use super::*;
 
     #[test]
     fn normal() {
         let (mut sender, mut receiver) = create_stream::<u8, ()>();
 
         futures::lazy(move || -> Result<(), ()> {
-            assert_eq!(receiver.poll(), Ok(Async::NotReady));
+                assert_eq!(receiver.poll(), Ok(Async::NotReady));
 
-            sender.send(0);
+                sender.send(0);
 
-            assert_eq!(receiver.poll(), Ok(Async::Ready(Some(0))));
-            assert_eq!(receiver.poll(), Ok(Async::NotReady));
+                assert_eq!(receiver.poll(), Ok(Async::Ready(Some(0))));
+                assert_eq!(receiver.poll(), Ok(Async::NotReady));
 
-            sender.send(1);
+                sender.send(1);
 
-            assert_eq!(receiver.poll(), Ok(Async::Ready(Some(1))));
-            assert_eq!(receiver.poll(), Ok(Async::NotReady));
+                assert_eq!(receiver.poll(), Ok(Async::Ready(Some(1))));
+                assert_eq!(receiver.poll(), Ok(Async::NotReady));
 
-            sender.close();
+                sender.close();
 
-            assert_eq!(receiver.poll(), Ok(Async::Ready(None)));
+                assert_eq!(receiver.poll(), Ok(Async::Ready(None)));
 
-            Ok(())
-        }).wait().unwrap();
+                Ok(())
+            })
+            .wait()
+            .unwrap();
     }
 
     #[test]
@@ -155,23 +154,25 @@ mod tests {
         let (mut sender, mut receiver) = create_stream::<u8, ()>();
 
         futures::lazy(move || -> Result<(), ()> {
-            assert_eq!(receiver.poll(), Ok(Async::NotReady));
+                assert_eq!(receiver.poll(), Ok(Async::NotReady));
 
-            sender.send(0);
+                sender.send(0);
 
-            assert_eq!(receiver.poll(), Ok(Async::Ready(Some(0))));
-            assert_eq!(receiver.poll(), Ok(Async::NotReady));
+                assert_eq!(receiver.poll(), Ok(Async::Ready(Some(0))));
+                assert_eq!(receiver.poll(), Ok(Async::NotReady));
 
-            sender.send(1);
+                sender.send(1);
 
-            assert_eq!(receiver.poll(), Ok(Async::Ready(Some(1))));
-            assert_eq!(receiver.poll(), Ok(Async::NotReady));
+                assert_eq!(receiver.poll(), Ok(Async::Ready(Some(1))));
+                assert_eq!(receiver.poll(), Ok(Async::NotReady));
 
-            sender.error(());
+                sender.error(());
 
-            assert_eq!(receiver.poll(), Err(()));
+                assert_eq!(receiver.poll(), Err(()));
 
-            Ok(())
-        }).wait().unwrap();
+                Ok(())
+            })
+            .wait()
+            .unwrap();
     }
 }
