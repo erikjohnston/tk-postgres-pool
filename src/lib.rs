@@ -100,6 +100,19 @@ impl<T> ConnectionPool<T>
 
         changed
     }
+
+    fn poll_open_connetions(&mut self) -> bool {
+        let new_vec = VecDeque::with_capacity(self.connections.len());
+        let conns = mem::replace(&mut self.connections, new_vec);
+        for mut conn in conns {
+            match conn.poll() {
+                Ok(Async::NotReady) => self.connections.push_back(conn),
+                _ => {}
+            }
+        }
+
+        false
+    }
 }
 
 impl<T: Io> Future for ConnectionPool<T>
@@ -111,7 +124,9 @@ impl<T: Io> Future for ConnectionPool<T>
 
     fn poll(&mut self) -> Result<Async<()>, ()> {
         while {
-            self.poll_receiver() || self.poll_new_connections()
+            self.poll_receiver()
+            || self.poll_new_connections()
+            || self.poll_open_connetions()
         } {}
 
         let finished = self.queue_receiver.is_none() &&
