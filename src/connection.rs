@@ -53,35 +53,48 @@ impl Decode for PostgresCodec {
 }
 
 
-pub struct PostgresConnection<T> {
+pub trait PostgresConnection: Future<Item=(), Error=IoError> {
+    fn send_query(&mut self, query: Query) -> Result<(), IoError>;
+    fn pending_queries(&self) -> usize;
+}
+
+
+pub struct IoPostgresConnection<T> {
     raw_conn: T,
     queue: VecDeque<Query>,
     resyncing: bool,
     transaction: Option<usize>,
 }
 
-impl<T> PostgresConnection<T>
-    where T: Sink<SinkItem = FrontendMessage, SinkError = IoError>
-{
-    pub fn new(conn: T) -> PostgresConnection<T> {
-        PostgresConnection {
+impl<T> IoPostgresConnection<T> {
+    pub fn new(conn: T) -> IoPostgresConnection<T> {
+        IoPostgresConnection {
             raw_conn: conn,
             queue: VecDeque::new(),
             transaction: None,
             resyncing: false,
         }
     }
+}
 
-    pub fn send_query(&mut self, query: Query) -> Result<(), IoError> {
+impl<T> PostgresConnection for IoPostgresConnection<T>
+    where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
+        + Stream<Item=BackendMessage, Error=IoError>
+{
+    fn send_query(&mut self, query: Query) -> Result<(), IoError> {
         for msg in &query.data {
             self.raw_conn.start_send(msg.clone())?;
         }
         self.queue.push_back(query);
         Ok(())
     }
+
+    fn pending_queries(&self) -> usize {
+        self.queue.len()
+    }
 }
 
-impl<T> Future for PostgresConnection<T>
+impl<T> Future for IoPostgresConnection<T>
     where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
         + Stream<Item=BackendMessage, Error=IoError>
 {
@@ -147,8 +160,9 @@ impl<T> Future for PostgresConnection<T>
 
 
 
-pub trait ConnectionFactory<T> {
-    type Future: Future<Item = T, Error = IoError>;
+pub trait ConnectionFactory {
+    type Item;
+    type Future: Future<Item = Self::Item, Error = IoError>;
 
     fn connect(&mut self) -> Self::Future;
 }
@@ -159,7 +173,8 @@ pub struct TcpConnectionFactory {
     handle: tokio_core::reactor::Handle,
 }
 
-impl ConnectionFactory<tokio_core::net::TcpStream> for TcpConnectionFactory {
+impl ConnectionFactory for TcpConnectionFactory {
+    type Item = tokio_core::net::TcpStream;
     type Future = tokio_core::net::TcpStreamNew;
 
     fn connect(&mut self) -> tokio_core::net::TcpStreamNew {
@@ -168,33 +183,33 @@ impl ConnectionFactory<tokio_core::net::TcpStream> for TcpConnectionFactory {
 }
 
 
-pub struct PostgresConnectionFactory<T, CF: ConnectionFactory<T>> {
-    conn_fac: CF,
+pub struct IoPostgresConnectionFactory<C> {
+    conn_fac: C,
     username: String,
     password: String,
-    _data: std::marker::PhantomData<T>,
 }
 
-impl<T: Io, CF: ConnectionFactory<T>> PostgresConnectionFactory<T, CF> {
-    pub fn connect(&mut self)
-        -> impl Future<Item = PostgresConnection<Framed<T, PostgresCodec>>,
-                  Error = IoError> {
+impl<C> ConnectionFactory for IoPostgresConnectionFactory<C> where C: ConnectionFactory, C::Item: Io + 'static, C::Future: 'static {
+    type Item = IoPostgresConnection<Framed<C::Item, PostgresCodec>>;
+    type Future = Box<Future<Item = Self::Item, Error = IoError>>;
 
+    fn connect(&mut self) -> Self::Future {
         let auth_params = AuthParams {
             username: self.username.clone(),
             password: self.password.clone(),
         };
 
-        self.conn_fac
+        let fut = self.conn_fac
             .connect()
             .and_then(move |conn| {
                 let pg_conn = IoBuf::new(conn).framed(PostgresCodec);
 
                 auth_params.start(pg_conn)
-            })
+            });
+
+        Box::new(fut)
     }
 }
-
 
 
 pub struct AuthParams {
@@ -204,7 +219,7 @@ pub struct AuthParams {
 
 impl AuthParams {
     pub fn start<T>(self, conn: T)
-        -> impl Future<Item = PostgresConnection<T>, Error = IoError>
+        -> impl Future<Item = IoPostgresConnection<T>, Error = IoError>
         where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
             + Stream<Item=BackendMessage, Error=IoError>
     {
@@ -268,7 +283,7 @@ impl AuthParams {
             })
             .and_then(move |conn| {
                 if let Some(conn) = conn {
-                    Ok(PostgresConnection::new(conn))
+                    Ok(IoPostgresConnection::new(conn))
                 } else {
                     Err(IoError::new(ErrorKind::UnexpectedEof, ""))
                 }

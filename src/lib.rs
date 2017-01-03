@@ -35,7 +35,7 @@ mod connection;
 mod vec_stream;
 
 
-use connection::PostgresConnection;
+use connection::{ConnectionFactory, PostgresConnection, IoPostgresConnectionFactory};
 use vec_stream::VecStreamSender;
 
 
@@ -46,16 +46,15 @@ pub struct Query {
 }
 
 
-pub struct ConnectionPool<T> {
-    connections: VecDeque<PostgresConnection<T>>,
-    new_connections: Vec<Box<Future<Item = PostgresConnection<T>,
-                                    Error = IoError>>>,
+pub struct ConnectionPool<C: ConnectionFactory> {
+    connections: Vec<C::Item>,
+    new_connections: Vec<C::Future>,
     queue_receiver: Option<Receiver<Query>>,
+    query_queue: VecDeque<Query>,
+    connection_factory: C,
 }
 
-impl<T> ConnectionPool<T>
-    where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
-        + Stream<Item=BackendMessage, Error=IoError>
+impl<C> ConnectionPool<C> where C: ConnectionFactory, C::Item: PostgresConnection
 {
     fn poll_new_connections(&mut self) -> bool {
         let mut changed = false;
@@ -65,7 +64,7 @@ impl<T> ConnectionPool<T>
         for mut future in new_conns {
             match future.poll() {
                 Ok(Async::Ready(conn)) => {
-                    self.connections.push_back(conn);
+                    self.connections.push(conn);
                     changed = true;
                 }
                 Ok(Async::NotReady) => self.new_connections.push(future),
@@ -85,11 +84,7 @@ impl<T> ConnectionPool<T>
 
         let changed = match queue_receiver.poll() {
             Ok(Async::Ready(Some(query))) => {
-// TODO: Launch new connections
-                let mut conn = self.connections.pop_front().unwrap();
-                if let Ok(()) = conn.send_query(query) {
-                    self.connections.push_back(conn);
-                }
+                self.new_query(query);
                 true
             }
             Ok(Async::NotReady) => false,
@@ -102,22 +97,48 @@ impl<T> ConnectionPool<T>
     }
 
     fn poll_open_connetions(&mut self) -> bool {
-        let new_vec = VecDeque::with_capacity(self.connections.len());
+        let new_vec = Vec::with_capacity(self.connections.len());
         let conns = mem::replace(&mut self.connections, new_vec);
         for mut conn in conns {
             match conn.poll() {
-                Ok(Async::NotReady) => self.connections.push_back(conn),
+                Ok(Async::NotReady) => self.connections.push(conn),
                 _ => {}
             }
         }
 
         false
     }
+
+    fn new_query(&mut self, query: Query) {
+        if !self.query_queue.is_empty() {
+            self.query_queue.push_back(query);
+            return;
+        }
+
+        self.query_queue.shrink_to_fit(); // Since we know its empty.
+
+        self.connections.sort_by_key(|conn| !conn.pending_queries());
+        // TODO: Make '5' configurable.
+        let pos_opt = self.connections.iter().position(|conn| conn.pending_queries() < 5);
+        if let Some(pos) = pos_opt {
+            let mut conn = self.connections.swap_remove(pos);
+            match conn.send_query(query) {
+                Ok(()) => self.connections.push(conn),
+                Err(_) => {} // TODO: Report error.
+            }
+        } else {
+            // TODO: Make '5' configurable.
+            if self.new_connections.is_empty() && self.connections.len() < 5 {
+                let fut = self.connection_factory.connect();
+                self.new_connections.push(fut);
+            }
+            self.query_queue.push_back(query);
+        }
+    }
 }
 
-impl<T: Io> Future for ConnectionPool<T>
-    where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
-        + Stream<Item=BackendMessage, Error=IoError>
+impl<C> Future for ConnectionPool<C>
+    where C: ConnectionFactory, C::Item: PostgresConnection
 {
     type Item = ();
     type Error = ();
