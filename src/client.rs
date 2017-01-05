@@ -11,6 +11,9 @@ use stream_fold::StreamFold;
 use types::{FromSql, ToSql};
 use types::Type;
 use vec_stream::{VecStreamReceiver, create_stream};
+use std::ops::Deref;
+use std::vec::IntoIter;
+use std::slice::Iter;
 
 
 #[derive(Clone)]
@@ -28,8 +31,8 @@ impl Client {
         let mut values = Vec::with_capacity(params.len());
 
         for param in params {
-            let (format, value) = param.serialize();
-            formats.push(format);
+            let value = param.serialize().map(|s| s.into_bytes());
+            formats.push(0);
             values.push(value);
         }
 
@@ -71,47 +74,65 @@ impl Client {
 }
 
 pub trait SerializeSql {
-    fn serialize(&self) -> (i16, Option<Vec<u8>>);
+    fn serialize(&self) -> Option<String>;
 }
 
 
 impl SerializeSql for String {
-    fn serialize(&self) -> (i16, Option<Vec<u8>>) {
-        (0, Some(self.as_bytes().to_owned()))
+    fn serialize(&self) -> Option<String> {
+        Some(self.clone())
     }
 }
 
 impl<'a> SerializeSql for &'a str {
-    fn serialize(&self) -> (i16, Option<Vec<u8>>) {
-        (0, Some(self.as_bytes().to_owned()))
+    fn serialize(&self) -> Option<String> {
+        Some((*self).to_owned())
     }
 }
 
 impl SerializeSql for i8 {
-    fn serialize(&self) -> (i16, Option<Vec<u8>>) {
+    fn serialize(&self) -> Option<String> {
         let string = format!("{}", self);
-        (0, Some(string.into_bytes()))
+        Some(string)
     }
 }
 
 impl SerializeSql for i16 {
-    fn serialize(&self) -> (i16, Option<Vec<u8>>) {
+    fn serialize(&self) -> Option<String> {
         let string = format!("{}", self);
-        (0, Some(string.into_bytes()))
+        Some(string)
     }
 }
 
 impl SerializeSql for i32 {
-    fn serialize(&self) -> (i16, Option<Vec<u8>>) {
+    fn serialize(&self) -> Option<String> {
         let string = format!("{}", self);
-        (0, Some(string.into_bytes()))
+        Some(string)
     }
 }
 
 impl SerializeSql for i64 {
-    fn serialize(&self) -> (i16, Option<Vec<u8>>) {
+    fn serialize(&self) -> Option<String> {
         let string = format!("{}", self);
-        (0, Some(string.into_bytes()))
+        Some(string)
+    }
+}
+
+impl<'a, T: SerializeSql> SerializeSql for &'a [T] {
+    fn serialize(&self) -> Option<String> {
+        let vec: Vec<_> = self.iter()
+            .map(|t| t.serialize().expect("Non null values in array"))
+            .map(|mut string| {
+                string.insert(0, '"');
+                string.push('"');
+                string
+            })
+            .collect();
+
+        let string = vec.join(",");
+
+        let string = format!("{{{}}}", string);
+        Some(string)
     }
 }
 
@@ -174,6 +195,33 @@ pub struct Row {
 impl Row {
     pub fn get<T: FromSql>(&self, idx: usize) -> T {
         self.cols[idx].get()
+    }
+}
+
+impl Deref for Row {
+    type Target = [Column];
+
+    fn deref(&self) -> &[Column] {
+        &self.cols[..]
+    }
+}
+
+impl<'a> IntoIterator for &'a Row {
+    type Item = &'a Column;
+    type IntoIter = Iter<'a, Column>;
+
+    fn into_iter(self) -> Iter<'a, Column> {
+        (&self.cols).into_iter()
+    }
+}
+
+
+impl IntoIterator for Row {
+    type Item = Column;
+    type IntoIter = IntoIter<Column>;
+
+    fn into_iter(self) -> IntoIter<Column> {
+        self.cols.into_iter()
     }
 }
 
