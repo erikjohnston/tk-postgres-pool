@@ -8,13 +8,16 @@ extern crate tokio_core;
 extern crate postgres_protocol;
 extern crate tk_bufstream;
 extern crate linear_map;
+#[macro_use]
+extern crate log;
+extern crate fallible_iterator;
 
 
 use futures::{Async, BoxFuture, Future, IntoFuture, Poll, Sink, future, task};
 use futures::stream::Stream;
-use futures::sync::mpsc::{Receiver, Sender, UnboundedSender};
+use futures::sync::mpsc::{Receiver, Sender, UnboundedSender, UnboundedReceiver};
 
-use pg::FrontendMessage;
+pub use pg::{FrontendMessage, backend_message_type};
 use postgres_protocol::authentication::md5_hash as postgres_md5_hash;
 use postgres_protocol::message::backend::Message as BackendMessage;
 use postgres_protocol::message::backend::ParseResult as BackendParseResult;
@@ -29,37 +32,57 @@ use tokio_core::io::Io;
 use tokio_core::net::TcpStream;
 
 
+mod client;
 mod pg;
+mod stream_for_each;
 mod stream_fold;
 mod connection;
-mod vec_stream;
+pub mod vec_stream;
+mod types;
 
 
-use connection::{ConnectionFactory, IoPostgresConnectionFactory,
-                 PostgresConnection};
+pub use connection::{ConnectionFactory, IoPostgresConnectionFactory,
+                 PostgresConnection, TcpConnectionFactory};
 use vec_stream::VecStreamSender;
+pub use client::{Client, SerializeSql};
 
 
 pub struct Query {
-    data: Vec<FrontendMessage>,
-    sender: VecStreamSender<BackendMessage, ()>,
-    retryable: bool,
+    pub data: Vec<FrontendMessage>,
+    pub sender: VecStreamSender<BackendMessage, IoError>,
 }
 
 
 pub struct ConnectionPool<C: ConnectionFactory> {
     connections: Vec<C::Item>,
     new_connections: Vec<C::Future>,
-    queue_receiver: Option<Receiver<Query>>,
+    queue_receiver: Option<UnboundedReceiver<Query>>,
     query_queue: VecDeque<Query>,
     connection_factory: C,
 }
 
 impl<C> ConnectionPool<C>
-    where C: ConnectionFactory,
+    where C: ConnectionFactory + 'static,
           C::Item: PostgresConnection
 {
+    pub fn spawn(connection_factory: C, handle: tokio_core::reactor::Handle) -> Client {
+        let (sender, receiver) = futures::sync::mpsc::unbounded();
+        let pool = ConnectionPool {
+            connections: Vec::new(),
+            new_connections: Vec::new(),
+            queue_receiver: Some(receiver),
+            query_queue: VecDeque::new(),
+            connection_factory: connection_factory,
+        };
+
+        handle.spawn(pool);
+
+        Client::new(sender)
+    }
+
     fn poll_new_connections(&mut self) -> bool {
+        debug!("poll_new_connections");
+
         let mut changed = false;
 
         let new_vec = Vec::with_capacity(self.new_connections.len());
@@ -69,9 +92,13 @@ impl<C> ConnectionPool<C>
                 Ok(Async::Ready(conn)) => {
                     self.connections.push(conn);
                     changed = true;
+                    self.handle_pending_queries();
                 }
                 Ok(Async::NotReady) => self.new_connections.push(future),
-                Err(err) => {} // TODO: Report error...
+                Err(err) => {
+                    // TODO: Report error...
+                    panic!("Failed to connect!");
+                }
             }
         }
 
@@ -87,7 +114,11 @@ impl<C> ConnectionPool<C>
 
         let changed = match queue_receiver.poll() {
             Ok(Async::Ready(Some(query))) => {
-                self.new_query(query);
+                debug!("Handling new query");
+                if let Some(query) = self.new_query(query) {
+                    debug!("Queuing new query");
+                    self.query_queue.push_back(query);
+                }
                 true
             }
             Ok(Async::NotReady) => false,
@@ -112,14 +143,7 @@ impl<C> ConnectionPool<C>
         false
     }
 
-    fn new_query(&mut self, query: Query) {
-        if !self.query_queue.is_empty() {
-            self.query_queue.push_back(query);
-            return;
-        }
-
-        self.query_queue.shrink_to_fit(); // Since we know its empty.
-
+    fn new_query(&mut self, query: Query) -> Option<Query> {
         self.connections.sort_by_key(|conn| !conn.pending_queries());
         // TODO: Make '5' configurable.
         let pos_opt =
@@ -130,19 +154,30 @@ impl<C> ConnectionPool<C>
                 Ok(()) => self.connections.push(conn),
                 Err(_) => {} // TODO: Report error.
             }
+            None
         } else {
             // TODO: Make '5' configurable.
             if self.new_connections.is_empty() && self.connections.len() < 5 {
                 let fut = self.connection_factory.connect();
                 self.new_connections.push(fut);
             }
-            self.query_queue.push_back(query);
+            Some(query)
+        }
+    }
+
+    fn handle_pending_queries(&mut self) {
+        debug!("Handling pending queries");
+        while let Some(query) = self.query_queue.pop_front() {
+            if let Some(query) = self.new_query(query) {
+                self.query_queue.push_front(query);
+                return
+            }
         }
     }
 }
 
 impl<C> Future for ConnectionPool<C>
-    where C: ConnectionFactory,
+    where C: ConnectionFactory + 'static,
           C::Item: PostgresConnection
 {
     type Item = ();

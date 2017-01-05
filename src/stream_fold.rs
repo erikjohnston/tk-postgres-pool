@@ -1,80 +1,77 @@
-use futures::{Async, Future, IntoFuture, Poll};
+// Copyright 2016 Openmarket
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use futures::{Async, Future, Poll};
 use futures::stream::Stream;
 
 use std::mem;
 
 
+/// A Stream adapater, similar to fold, that consumes the start of the stream to build up an
+/// object, but then returns both the object *and* the stream.
 #[must_use = "futures do nothing unless polled"]
-pub struct StreamForEach<S, F, U>
-    where U: IntoFuture
-{
+pub struct StreamFold<I, E, S: Stream<Item=I, Error=E>, V, F: FnMut(I, V) -> (bool, V)> {
     func: F,
-    state: State<S, U>,
+    state: StreamFoldState<S, V>
 }
 
-impl<S, F, U> StreamForEach<S, F, U>
-    where U: IntoFuture
-{
-    pub fn new(stream: S, func: F) -> StreamForEach<S, F, U> {
-        StreamForEach {
+impl<I, E, S: Stream<Item=I, Error=E>, V, F: FnMut(I, V) -> (bool, V)> StreamFold<I, E, S, V, F> {
+    pub fn new(stream: S, value: V, func: F) -> StreamFold<I, E, S, V, F> {
+        StreamFold {
             func: func,
-            state: State::Stream(stream),
+            state: StreamFoldState::Full {
+                stream: stream,
+                value: value,
+            }
         }
     }
 }
 
-enum State<S, U>
-    where U: IntoFuture
-{
+enum StreamFoldState<S, V> {
     Empty,
-    Future(U::Future),
-    Stream(S),
+    Full {
+        stream: S,
+        value: V,
+    }
 }
 
-impl<I, E, S, F, U> Future for StreamForEach<S, F, U>
-    where S: Stream<Item = I, Error = E>,
-          F: FnMut(I, S) -> U,
-          U: IntoFuture<Item = (bool, S), Error = E>
-{
-    type Item = Option<S>;
+impl<I, E, S: Stream<Item=I, Error=E>, V, F: FnMut(I, V) -> (bool, V)> Future for StreamFold<I, E, S, V, F> {
+    type Item = Option<(V, S)>;
     type Error = E;
 
-    fn poll(&mut self) -> Poll<Self::Item, E> {
-        let state = mem::replace(&mut self.state, State::Empty);
-
-        let mut future = match state {
-            State::Empty => panic!("cannot poll StreamForEach twice"),
-            State::Stream(mut stream) => {
-                let item = match stream.poll()? {
-                    Async::Ready(Some(item)) => item,
-                    Async::Ready(None) => return Ok(Async::Ready(None)),
-                    Async::NotReady => {
-                        self.state = State::Stream(stream);
-                        return Ok(Async::NotReady);
-                    }
-                };
-
-                (self.func)(item, stream).into_future()
-            }
-            State::Future(future) => future,
+    fn poll(&mut self) -> Poll<Option<(V, S)>, E> {
+        let (mut stream, mut value) = match mem::replace(&mut self.state, StreamFoldState::Empty) {
+            StreamFoldState::Empty => panic!("cannot poll Fold twice"),
+            StreamFoldState::Full { stream, value } => (stream, value),
         };
 
-        match future.poll() {
-            Ok(Async::Ready((done, stream))) => {
-                if done {
-                    Ok(Async::Ready(Some(stream)))
-                } else {
-                    self.state = State::Stream(stream);
-                    Ok(Async::NotReady)
+        loop {
+            match stream.poll()? {
+                Async::Ready(Some(item)) => {
+                    let (done, val) = (self.func)(item, value);
+                    value = val;
+                    if done {
+                        return Ok(Async::Ready(Some((value, stream))))
+                    }
                 }
-            }
-            Ok(Async::NotReady) => {
-                self.state = State::Future(future);
-                Ok(Async::NotReady)
-            }
-            Err(e) => {
-                self.state = State::Empty;
-                Err(e)
+                Async::Ready(None) => {
+                    return Ok(Async::Ready(None))
+                }
+                Async::NotReady => {
+                    self.state = StreamFoldState::Full { stream: stream, value: value };
+                    return Ok(Async::NotReady)
+                }
             }
         }
     }

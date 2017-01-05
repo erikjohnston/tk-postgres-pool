@@ -4,8 +4,11 @@ name = "tokio-postgres"
 version = "0.1.0"
 
 [dependencies]
+env_logger = "0.3.5"
+fallible-iterator = "0.1.3"
 futures = "0.1.7"
 linear-map = "1.1.0"
+log = "0.3.6"
 netbuf = "0.3.3"
 postgres-protocol = "0.1.1"
 quick-error = "1.1.0"

@@ -1,7 +1,43 @@
 use postgres_protocol::Oid;
 use postgres_protocol::message::frontend::Message;
+use postgres_protocol::message::backend::Message as BackendMessage;
 
 use std::io::Error as IoError;
+
+
+pub fn backend_message_type(msg: &BackendMessage) -> &'static str {
+    use BackendMessage::*;
+    match *msg {
+        AuthenticationOk => "AuthenticationOk",
+        AuthenticationCleartextPassword => "AuthenticationCleartextPassword",
+        AuthenticationGSS => "AuthenticationGSS",
+        AuthenticationKerberosV5 => "AuthenticationKerberosV5",
+        AuthenticationMD5Password { .. } => "AuthenticationMD5Password",
+        AuthenticationSCMCredential => "AuthenticationSCMCredential",
+        AuthenticationSSPI => "AuthenticationSSPI",
+        BackendKeyData { .. } => "BackendKeyData",
+        BindComplete => "BindComplete",
+        CloseComplete => "CloseComplete",
+        CommandComplete { .. } => "CommandComplete",
+        CopyData { .. } => "CopyData",
+        CopyDone => "CopyDone",
+        CopyInResponse { .. } => "CopyInResponse",
+        CopyOutResponse { .. } => "CopyOutResponse",
+        DataRow { .. } => "DataRow",
+        EmptyQueryResponse => "EmptyQueryResponse",
+        ErrorResponse { .. } => "ErrorResponse",
+        NoData => "NoData",
+        NoticeResponse { .. } => "NoticeResponse",
+        NotificationResponse { .. } => "NotificationResponse",
+        ParameterDescription { .. } => "ParameterDescription",
+        ParameterStatus { .. } => "ParameterStatus",
+        ParseComplete => "ParseComplete",
+        PortalSuspended => "PortalSuspended",
+        ReadyForQuery { .. } => "ReadyForQuery",
+        RowDescription { .. } => "RowDescription",
+        _ => "Unknown",
+    }
+}
 
 
 #[derive(Debug, Clone)]

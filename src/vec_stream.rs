@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 struct VecStreamInner<T, E> {
     task: Option<Task>,
     state: State<T, E>,
+    is_closing: bool,
 }
 
 impl<T, E> VecStreamInner<T, E> {
@@ -14,6 +15,7 @@ impl<T, E> VecStreamInner<T, E> {
         VecStreamInner {
             task: None,
             state: State::Items { queue: VecDeque::new() },
+            is_closing: false,
         }
     }
 }
@@ -36,6 +38,10 @@ impl<T, E> Stream for VecStreamReceiver<T, E> {
     fn poll(&mut self) -> Poll<Option<T>, E> {
         let mut inner = self.inner.lock().expect("mutext was poisoned");
 
+        if inner.task.is_none() {
+            inner.task = Some(task::park());
+        }
+
         let state = mem::replace(&mut inner.state, State::Empty);
 
         match state {
@@ -44,14 +50,15 @@ impl<T, E> Stream for VecStreamReceiver<T, E> {
             State::Errored { error } => Err(error),
             State::Items { mut queue } => {
                 let front = queue.pop_front();
-                inner.state = State::Items { queue: queue };
+                if inner.is_closing && queue.is_empty() {
+                    inner.state = State::Done;
+                } else {
+                    inner.state = State::Items { queue: queue };
+                }
 
                 if let Some(item) = front {
                     Ok(Async::Ready(Some(item)))
                 } else {
-                    if inner.task.is_none() {
-                        inner.task = Some(task::park());
-                    }
                     Ok(Async::NotReady)
                 }
             }
@@ -79,6 +86,10 @@ impl<T, E> VecStreamSender<T, E> {
         if let State::Items { ref mut queue } = inner.state {
             queue.push_back(item);
         }
+
+        if let Some(ref mut task) = inner.task {
+            task.unpark();
+        }
     }
 
     pub fn error(&mut self, error: E) {
@@ -86,18 +97,38 @@ impl<T, E> VecStreamSender<T, E> {
 
         match inner.state {
             State::Items { .. } => {
-                inner.state = State::Errored { error: error }
+                inner.state = State::Errored { error: error };
             }
             _ => {}
+        };
+
+        if let Some(ref mut task) = inner.task {
+            task.unpark();
         }
     }
 
     pub fn close(&mut self) {
         let mut inner = self.inner.lock().expect("mutext was poisoned");
 
-        match inner.state {
-            State::Items { .. } => inner.state = State::Done,
-            _ => {}
+        let is_empty = match inner.state {
+            State::Items { ref queue } => {
+                if queue.is_empty() {
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        };
+
+        if is_empty {
+            inner.state = State::Done;
+        } else {
+            inner.is_closing = true;
+        }
+
+        if let Some(ref mut task) = inner.task {
+            task.unpark();
         }
     }
 }

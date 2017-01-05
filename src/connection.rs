@@ -19,7 +19,7 @@ use std::io::Error as IoError;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
-use stream_fold::StreamForEach;
+use stream_for_each::StreamForEach;
 use tk_bufstream::{Buf, Decode, Encode, Framed, IoBuf};
 use tokio_core;
 use tokio_core::io::Io;
@@ -44,6 +44,7 @@ impl Decode for PostgresCodec {
     fn decode(&mut self, buf: &mut Buf) -> Result<Option<Self::Item>, IoError> {
         match BackendMessage::parse(buf.as_ref())? {
             BackendParseResult::Complete { message, consumed } => {
+                debug!("Decoded msg");
                 buf.consume(consumed);
                 Ok(Some(message))
             }
@@ -77,6 +78,7 @@ impl<T> IoPostgresConnection<T> {
     }
 
     fn handle_msg(&mut self, msg: BackendMessage) -> Result<(), IoError> {
+        debug!("Got new incoming backend msg");
         match msg {
             BackendMessage::PortalSuspended { .. } => {
                 return Err(IoError::new(ErrorKind::Other,
@@ -106,6 +108,7 @@ impl<T> IoPostgresConnection<T> {
                         let sender = &mut query.sender;
                         sender.send(msg);
                     } else {
+                        debug!("Couldn't find a Query");
                         // TODO: Something has probably gone wrong, unless
                         // its a NoticeMessage or something like that.
                     }
@@ -115,7 +118,10 @@ impl<T> IoPostgresConnection<T> {
                     self.resyncing = false;
                     // TODO: Handle if we don't have anything to pop.
                     if let Some(mut query) = self.queue.pop_front() {
+                        debug!("Closing front of queue");
                         query.sender.close();
+                    } else {
+                        debug!("Couldn't find a Query to finish");
                     }
                 }
             }
@@ -130,9 +136,12 @@ impl<T> PostgresConnection for IoPostgresConnection<T>
         + Stream<Item=BackendMessage, Error=IoError>
 {
     fn send_query(&mut self, query: Query) -> Result<(), IoError> {
+        debug!("Sending Query");
         for msg in &query.data {
             self.raw_conn.start_send(msg.clone())?;
         }
+        self.raw_conn.start_send(FrontendMessage::Sync)?;        
+        debug!("Sent.");
         self.queue.push_back(query);
         Ok(())
     }
@@ -179,6 +188,15 @@ pub struct TcpConnectionFactory {
     handle: tokio_core::reactor::Handle,
 }
 
+impl TcpConnectionFactory {
+    pub fn new(addr: std::net::SocketAddr, handle: tokio_core::reactor::Handle) -> TcpConnectionFactory {
+        TcpConnectionFactory {
+            addr: addr,
+            handle: handle,
+        }
+    }
+}
+
 impl ConnectionFactory for TcpConnectionFactory {
     type Item = tokio_core::net::TcpStream;
     type Future = tokio_core::net::TcpStreamNew;
@@ -195,6 +213,16 @@ pub struct IoPostgresConnectionFactory<C> {
     password: String,
 }
 
+impl<C> IoPostgresConnectionFactory<C> {
+    pub fn new<U: Into<String>, P: Into<String>>(conn_fac: C, username: U, password: P) -> IoPostgresConnectionFactory<C> {
+        IoPostgresConnectionFactory {
+            conn_fac: conn_fac,
+            username: username.into(),
+            password: password.into(),
+        }
+    }
+}
+
 impl<C> ConnectionFactory for IoPostgresConnectionFactory<C>
     where C: ConnectionFactory,
           C::Item: Io + 'static,
@@ -204,6 +232,8 @@ impl<C> ConnectionFactory for IoPostgresConnectionFactory<C>
     type Future = Box<Future<Item = Self::Item, Error = IoError>>;
 
     fn connect(&mut self) -> Self::Future {
+        debug!("Creating new connection");
+
         let auth_params = AuthParams {
             username: self.username.clone(),
             password: self.password.clone(),
@@ -212,9 +242,14 @@ impl<C> ConnectionFactory for IoPostgresConnectionFactory<C>
         let fut = self.conn_fac
             .connect()
             .and_then(move |conn| {
+                debug!("Connected. Authing...");
+
                 let pg_conn = IoBuf::new(conn).framed(PostgresCodec);
 
                 auth_params.start(pg_conn)
+            }).map(move |conn| {
+                debug!("Authed new connection");
+                conn
             });
 
         Box::new(fut)
@@ -239,6 +274,7 @@ impl AuthParams {
         conn.send(startup)
             .and_then(move |conn| {
                 StreamForEach::new(conn, move |msg, conn: T| {
+                    debug!("Got msg in response to auth");
                     // We lift this function up here so that we don't to
                     // copy it.
                     let send_password = move |password: String, conn: T| {
@@ -262,8 +298,9 @@ impl AuthParams {
                         AuthenticationCleartextPassword => {
                             send_password(self.password.clone(), conn)
                         }
-                        AuthenticationOk => {
-                            future::Either::A(Ok((true, conn)).into_future())
+                        AuthenticationOk | ParameterStatus { .. } | BackendKeyData { .. } => {
+                            // Yay! Now we need to wait for the first ReadyForQuery
+                            future::Either::A(Ok((false, conn)).into_future())
                         }
                         AuthenticationGSS |
                         AuthenticationKerberosV5 |
@@ -281,6 +318,9 @@ impl AuthParams {
                             let err = IoError::new(ErrorKind::Other,
                                                    map[&b'M'].to_owned());
                             future::Either::A(Err(err).into_future())
+                        }
+                        ReadyForQuery { .. } => {
+                            future::Either::A(Ok((true, conn)).into_future())
                         }
                         _ => {
                             let err = IoError::new(ErrorKind::Other,
@@ -308,6 +348,8 @@ mod tests {
     use futures::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
     use std::collections::BTreeMap;
     use super::*;
+
+    extern crate env_logger;
 
 
     struct TestConnBacking {
@@ -389,6 +431,8 @@ mod tests {
 
     #[test]
     fn test_startup_no_auth() {
+        let _ = env_logger::init();
+
         futures::lazy(|| {
                 let auth_params = AuthParams {
                     username: "foo".into(),
@@ -412,6 +456,7 @@ mod tests {
                             _ => panic!("Expected startup message"),
                         }
                         backing.send_msg(BackendMessage::AuthenticationOk);
+                        backing.send_msg(BackendMessage::ReadyForQuery { state: b'I' });
                         Ok(())
                     })
                     .map_err(|(err, _)| err);
@@ -424,6 +469,8 @@ mod tests {
 
     #[test]
     fn test_startup_cleartext_auth() {
+        let _ = env_logger::init();
+
         futures::lazy(|| {
                 let auth_params = AuthParams {
                     username: "foo".into(),
@@ -455,6 +502,11 @@ mod tests {
                         _ => panic!("Expected password message"),
                     }
                     backing.send_msg(BackendMessage::AuthenticationOk);
+                    Ok(backing)
+                })
+                .and_then(|mut backing| {
+                    println!("Got AuthenticationOk message");
+                    backing.send_msg(BackendMessage::ReadyForQuery { state: b'I' });
                     Ok(())
                 })
                 .map_err(|(err, _)| err);
