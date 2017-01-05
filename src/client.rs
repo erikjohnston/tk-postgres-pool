@@ -23,7 +23,7 @@ impl Client {
         Client { query_sender: query_sender }
     }
 
-    pub fn execute<S: Into<String>>(&mut self, query: S, params: &[&SerializeSql]) -> Rows {
+    pub fn execute<S: Into<String>>(&mut self, query: S, params: &[&SerializeSql]) -> RowsStream {
         let mut formats = Vec::with_capacity(params.len());
         let mut values = Vec::with_capacity(params.len());
 
@@ -63,7 +63,7 @@ impl Client {
 
         self.query_sender.send(query).expect("ConnectionPool was dropped");
 
-        Rows {
+        RowsStream {
             receiver: receiver,
             column_types: Vec::new(),
         }
@@ -116,13 +116,13 @@ impl SerializeSql for i64 {
 }
 
 
-pub struct Rows {
+pub struct RowsStream {
     receiver: VecStreamReceiver<BackendMessage, IoError>,
     column_types: Vec<Type>,
 }
 
-impl Stream for Rows {
-    type Item = Vec<Column>;
+impl Stream for RowsStream {
+    type Item = Row;
     type Error = IoError;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
@@ -151,7 +151,9 @@ impl Stream for Rows {
                         })
                         .collect();
 
-                    return Ok(Async::Ready(Some(vec)));
+                    return Ok(Async::Ready(Some(Row {
+                        cols: vec,
+                    })));
                 }
                 BackendMessage::ErrorResponse { fields } => {
                     let map: LinearMap<_, _> = fields.into_iter().collect();
@@ -163,6 +165,18 @@ impl Stream for Rows {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct Row {
+    cols: Vec<Column>,
+}
+
+impl Row {
+    pub fn get<T: FromSql>(&self, idx: usize) -> T {
+        self.cols[idx].get()
+    }
+}
+
 
 #[derive(Debug, Clone)]
 pub struct Column {
