@@ -15,7 +15,7 @@ extern crate fallible_iterator;
 
 use futures::{Async, BoxFuture, Future, IntoFuture, Poll, Sink, future, task};
 use futures::stream::Stream;
-use futures::sync::mpsc::{Receiver, Sender, UnboundedSender, UnboundedReceiver};
+use futures::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
 pub use pg::{FrontendMessage, backend_message_type};
 use postgres_protocol::authentication::md5_hash as postgres_md5_hash;
@@ -41,10 +41,10 @@ pub mod vec_stream;
 mod types;
 
 
-pub use connection::{ConnectionFactory, IoPostgresConnectionFactory,
-                 PostgresConnection, TcpConnectionFactory};
-use vec_stream::VecStreamSender;
 pub use client::{Client, SerializeSql};
+pub use connection::{ConnectionFactory, IoPostgresConnectionFactory, PostgresConnection,
+                     TcpConnectionFactory};
+use vec_stream::VecStreamSender;
 
 
 pub struct Query {
@@ -146,8 +146,7 @@ impl<C> ConnectionPool<C>
     fn new_query(&mut self, query: Query) -> Option<Query> {
         self.connections.sort_by_key(|conn| !conn.pending_queries());
         // TODO: Make '5' configurable.
-        let pos_opt =
-            self.connections.iter().position(|conn| conn.pending_queries() < 5);
+        let pos_opt = self.connections.iter().position(|conn| conn.pending_queries() < 5);
         if let Some(pos) = pos_opt {
             let mut conn = self.connections.swap_remove(pos);
             match conn.send_query(query) {
@@ -170,7 +169,7 @@ impl<C> ConnectionPool<C>
         while let Some(query) = self.query_queue.pop_front() {
             if let Some(query) = self.new_query(query) {
                 self.query_queue.push_front(query);
-                return
+                return;
             }
         }
     }
@@ -185,12 +184,10 @@ impl<C> Future for ConnectionPool<C>
 
     fn poll(&mut self) -> Result<Async<()>, ()> {
         while {
-            self.poll_receiver() || self.poll_new_connections() ||
-            self.poll_open_connetions()
+            self.poll_receiver() || self.poll_new_connections() || self.poll_open_connetions()
         } {}
 
-        let finished = self.queue_receiver.is_none() &&
-                       self.connections.is_empty() &&
+        let finished = self.queue_receiver.is_none() && self.connections.is_empty() &&
                        self.new_connections.is_empty();
 
         if finished {

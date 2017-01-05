@@ -6,4 +6,4 @@ where_indent = "Visual"
 fn_return_indent = "WithWhereClause"
 reorder_imports = true
 reorder_imported_names = true
-max_width = 80
+max_width = 100

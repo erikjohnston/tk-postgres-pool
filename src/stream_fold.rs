@@ -21,29 +21,30 @@ use std::mem;
 /// A Stream adapater, similar to fold, that consumes the start of the stream to build up an
 /// object, but then returns both the object *and* the stream.
 #[must_use = "futures do nothing unless polled"]
-pub struct StreamFold<I, E, S: Stream<Item=I, Error=E>, V, F: FnMut(I, V) -> (bool, V)> {
+pub struct StreamFold<I, E, S: Stream<Item = I, Error = E>, V, F: FnMut(I, V) -> (bool, V)> {
     func: F,
-    state: StreamFoldState<S, V>
+    state: StreamFoldState<S, V>,
 }
 
-impl<I, E, S: Stream<Item=I, Error=E>, V, F: FnMut(I, V) -> (bool, V)> StreamFold<I, E, S, V, F> {
+impl<I, E, S: Stream<Item = I, Error = E>, V, F: FnMut(I, V) -> (bool, V)> StreamFold<I,
+                                                                                      E,
+                                                                                      S,
+                                                                                      V,
+                                                                                      F> {
     pub fn new(stream: S, value: V, func: F) -> StreamFold<I, E, S, V, F> {
         StreamFold {
             func: func,
             state: StreamFoldState::Full {
                 stream: stream,
                 value: value,
-            }
+            },
         }
     }
 }
 
 enum StreamFoldState<S, V> {
     Empty,
-    Full {
-        stream: S,
-        value: V,
-    }
+    Full { stream: S, value: V },
 }
 
 impl<I, E, S: Stream<Item=I, Error=E>, V, F: FnMut(I, V) -> (bool, V)> Future for StreamFold<I, E, S, V, F> {

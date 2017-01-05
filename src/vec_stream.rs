@@ -111,13 +111,7 @@ impl<T, E> VecStreamSender<T, E> {
         let mut inner = self.inner.lock().expect("mutext was poisoned");
 
         let is_empty = match inner.state {
-            State::Items { ref queue } => {
-                if queue.is_empty() {
-                    true
-                } else {
-                    false
-                }
-            },
+            State::Items { ref queue } => if queue.is_empty() { true } else { false },
             _ => false,
         };
 
@@ -134,9 +128,7 @@ impl<T, E> VecStreamSender<T, E> {
 }
 
 
-pub fn create_stream<T, E>
-    ()
-    -> (VecStreamSender<T, E>, VecStreamReceiver<T, E>) {
+pub fn create_stream<T, E>() -> (VecStreamSender<T, E>, VecStreamReceiver<T, E>) {
     let inner = Arc::new(Mutex::new(VecStreamInner::new()));
 
     let sender = VecStreamSender { inner: inner.clone() };

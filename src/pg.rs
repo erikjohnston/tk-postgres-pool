@@ -1,6 +1,6 @@
 use postgres_protocol::Oid;
-use postgres_protocol::message::frontend::Message;
 use postgres_protocol::message::backend::Message as BackendMessage;
+use postgres_protocol::message::frontend::Message;
 
 use std::io::Error as IoError;
 
@@ -116,9 +116,7 @@ impl FrontendMessage {
             FrontendMessage::PasswordMessage { ref password } => {
                 Message::PasswordMessage { password: &password }
             }
-            FrontendMessage::Query { ref query } => {
-                Message::Query { query: &query }
-            }
+            FrontendMessage::Query { ref query } => Message::Query { query: &query },
             FrontendMessage::SslRequest => Message::SslRequest,
             FrontendMessage::StartupMessage { ref parameters } => {
                 Message::StartupMessage { parameters: &parameters }

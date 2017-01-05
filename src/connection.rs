@@ -81,25 +81,23 @@ impl<T> IoPostgresConnection<T> {
         debug!("Got new incoming backend msg");
         match msg {
             BackendMessage::PortalSuspended { .. } => {
-                return Err(IoError::new(ErrorKind::Other,
-                                        "Unexpected Portal Suspended message"));
+                return Err(IoError::new(ErrorKind::Other, "Unexpected Portal Suspended message"));
             }
             BackendMessage::ParameterStatus { .. } => {}
             msg => {
                 // Work out if the current 'Query' is finished.
-                let is_finished =
-                    if let BackendMessage::ReadyForQuery { state } = msg {
-                        match state {
-                            b'I' => {}
-                            b'T' => {} // TODO: Ensure we're in txn.
-                            b'E' => {} // TODO
-                            _ => panic!("Unexpected state from PG"), // TODO
-                        }
+                let is_finished = if let BackendMessage::ReadyForQuery { state } = msg {
+                    match state {
+                        b'I' => {}
+                        b'T' => {} // TODO: Ensure we're in txn.
+                        b'E' => {} // TODO
+                        _ => panic!("Unexpected state from PG"), // TODO
+                    }
 
-                        true
-                    } else {
-                        false
-                    };
+                    true
+                } else {
+                    false
+                };
 
                 // If we're resyncing we wait until the next ReadyForQuery
                 // message.
@@ -140,7 +138,7 @@ impl<T> PostgresConnection for IoPostgresConnection<T>
         for msg in &query.data {
             self.raw_conn.start_send(msg.clone())?;
         }
-        self.raw_conn.start_send(FrontendMessage::Sync)?;        
+        self.raw_conn.start_send(FrontendMessage::Sync)?;
         debug!("Sent.");
         self.queue.push_back(query);
         Ok(())
@@ -189,7 +187,10 @@ pub struct TcpConnectionFactory {
 }
 
 impl TcpConnectionFactory {
-    pub fn new(addr: std::net::SocketAddr, handle: tokio_core::reactor::Handle) -> TcpConnectionFactory {
+    pub fn new(
+        addr: std::net::SocketAddr,
+        handle: tokio_core::reactor::Handle
+    ) -> TcpConnectionFactory {
         TcpConnectionFactory {
             addr: addr,
             handle: handle,
@@ -214,7 +215,11 @@ pub struct IoPostgresConnectionFactory<C> {
 }
 
 impl<C> IoPostgresConnectionFactory<C> {
-    pub fn new<U: Into<String>, P: Into<String>>(conn_fac: C, username: U, password: P) -> IoPostgresConnectionFactory<C> {
+    pub fn new<U: Into<String>, P: Into<String>>(
+        conn_fac: C,
+        username: U,
+        password: P
+    ) -> IoPostgresConnectionFactory<C> {
         IoPostgresConnectionFactory {
             conn_fac: conn_fac,
             username: username.into(),
@@ -247,7 +252,8 @@ impl<C> ConnectionFactory for IoPostgresConnectionFactory<C>
                 let pg_conn = IoBuf::new(conn).framed(PostgresCodec);
 
                 auth_params.start(pg_conn)
-            }).map(move |conn| {
+            })
+            .map(move |conn| {
                 debug!("Authed new connection");
                 conn
             });
@@ -278,9 +284,7 @@ impl AuthParams {
                     // We lift this function up here so that we don't to
                     // copy it.
                     let send_password = move |password: String, conn: T| {
-                        let m = FrontendMessage::PasswordMessage {
-                            password: password,
-                        };
+                        let m = FrontendMessage::PasswordMessage { password: password };
                         let f = conn.send(m);
                         future::Either::B(f.map(|conn| (false, conn)))
                     };
@@ -288,17 +292,18 @@ impl AuthParams {
                     use BackendMessage::*;
                     match msg {
                         AuthenticationMD5Password { salt } => {
-                            let md5ed =
-                                postgres_md5_hash(self.username.as_bytes(),
-                                                  self.password.as_bytes(),
-                                                  salt);
+                            let md5ed = postgres_md5_hash(self.username.as_bytes(),
+                                                          self.password.as_bytes(),
+                                                          salt);
 
                             send_password(md5ed, conn)
                         }
                         AuthenticationCleartextPassword => {
                             send_password(self.password.clone(), conn)
                         }
-                        AuthenticationOk | ParameterStatus { .. } | BackendKeyData { .. } => {
+                        AuthenticationOk |
+                        ParameterStatus { .. } |
+                        BackendKeyData { .. } => {
                             // Yay! Now we need to wait for the first ReadyForQuery
                             future::Either::A(Ok((false, conn)).into_future())
                         }
@@ -306,26 +311,21 @@ impl AuthParams {
                         AuthenticationKerberosV5 |
                         AuthenticationSCMCredential |
                         AuthenticationSSPI => {
-                            let err = IoError::new(ErrorKind::Other,
-                                                   "Unsupported \
-                                                    authentication type \
-                                                    requested");
+                            let err =
+                                IoError::new(ErrorKind::Other,
+                                             "Unsupported authentication type requested");
                             future::Either::A(Err(err).into_future())
                         }
                         ErrorResponse { fields } => {
                             let map: LinearMap<_, _> = fields.into_iter()
                                 .collect();
-                            let err = IoError::new(ErrorKind::Other,
-                                                   map[&b'M'].to_owned());
+                            let err = IoError::new(ErrorKind::Other, map[&b'M'].to_owned());
                             future::Either::A(Err(err).into_future())
                         }
-                        ReadyForQuery { .. } => {
-                            future::Either::A(Ok((true, conn)).into_future())
-                        }
+                        ReadyForQuery { .. } => future::Either::A(Ok((true, conn)).into_future()),
                         _ => {
-                            let err = IoError::new(ErrorKind::Other,
-                                                   "Unexpected message from \
-                                                    backend");
+                            let err =
+                                IoError::new(ErrorKind::Other, "Unexpected message from backend");
                             future::Either::A(Err(err).into_future())
                         }
                     }
@@ -445,11 +445,9 @@ mod tests {
                 let server_future = backing.into_future()
                     .and_then(|(item, mut backing)| {
                         match item {
-                            Some(FrontendMessage::StartupMessage {
-                                parameters
-                            }) => {
-                                let parameters: BTreeMap<String, String>
-                                    = parameters.into_iter().collect();
+                            Some(FrontendMessage::StartupMessage { parameters }) => {
+                                let parameters: BTreeMap<String, String> = parameters.into_iter()
+                                    .collect();
                                 assert_eq!(parameters["user"], "foo");
                                 println!("Got starup message");
                             }
@@ -481,35 +479,33 @@ mod tests {
                 let client_startup_future = auth_params.start(conn);
 
                 let server_future = backing.into_future()
-                .and_then(|(item, mut backing)| {
-                    match item {
-                        Some(FrontendMessage::StartupMessage { .. }) => {
-                            println!("Got starup message");
+                    .and_then(|(item, mut backing)| {
+                        match item {
+                            Some(FrontendMessage::StartupMessage { .. }) => {
+                                println!("Got starup message");
+                            }
+                            _ => panic!("Expected startup message"),
                         }
-                        _ => panic!("Expected startup message"),
-                    }
-                    backing.send_msg(
-                        BackendMessage::AuthenticationCleartextPassword
-                    );
-                    backing.into_future()
-                })
-                .and_then(|(item, mut backing)| {
-                    match item {
-                        Some(FrontendMessage::PasswordMessage { password }) => {
-                            assert_eq!(&password, "bar");
-                            println!("Got password message");
+                        backing.send_msg(BackendMessage::AuthenticationCleartextPassword);
+                        backing.into_future()
+                    })
+                    .and_then(|(item, mut backing)| {
+                        match item {
+                            Some(FrontendMessage::PasswordMessage { password }) => {
+                                assert_eq!(&password, "bar");
+                                println!("Got password message");
+                            }
+                            _ => panic!("Expected password message"),
                         }
-                        _ => panic!("Expected password message"),
-                    }
-                    backing.send_msg(BackendMessage::AuthenticationOk);
-                    Ok(backing)
-                })
-                .and_then(|mut backing| {
-                    println!("Got AuthenticationOk message");
-                    backing.send_msg(BackendMessage::ReadyForQuery { state: b'I' });
-                    Ok(())
-                })
-                .map_err(|(err, _)| err);
+                        backing.send_msg(BackendMessage::AuthenticationOk);
+                        Ok(backing)
+                    })
+                    .and_then(|mut backing| {
+                        println!("Got AuthenticationOk message");
+                        backing.send_msg(BackendMessage::ReadyForQuery { state: b'I' });
+                        Ok(())
+                    })
+                    .map_err(|(err, _)| err);
 
                 server_future.join(client_startup_future)
             })

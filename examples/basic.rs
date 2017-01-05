@@ -6,9 +6,11 @@ extern crate env_logger;
 
 
 use futures::Stream;
-use tokio_core::net::TcpStream;
-use tokio_postgres::{ConnectionFactory, IoPostgresConnectionFactory, TcpConnectionFactory, ConnectionPool, Query, FrontendMessage, backend_message_type};
 use postgres_protocol::message::backend::Message;
+use tokio_core::net::TcpStream;
+use tokio_postgres::{ConnectionFactory, ConnectionPool, FrontendMessage,
+                     IoPostgresConnectionFactory, Query, TcpConnectionFactory,
+                     backend_message_type};
 
 
 fn main() {
@@ -21,13 +23,15 @@ fn main() {
 
     let mut client = ConnectionPool::spawn(pg_fac, core.handle());
 
-    core.run(client.execute("SELECT * FROM test WHERE test = $1", &[&"foo\n"]).for_each(|row| {
-        println!("Received msg: {:?}", row);
+    core.run(client.execute("SELECT * FROM test WHERE test = $1", &[&"foo\n"])
+            .for_each(|row| {
+                println!("Received msg: {:?}", row);
 
-        for column in row {
-            println!("Column as _: {:?}", column.get::<String>());
-        }
+                for column in row {
+                    println!("Column as _: {:?}", column.get::<String>());
+                }
 
-        Ok(())
-    })).unwrap();
+                Ok(())
+            }))
+        .unwrap();
 }
