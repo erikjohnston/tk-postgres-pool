@@ -311,9 +311,8 @@ impl AuthParams {
                         AuthenticationKerberosV5 |
                         AuthenticationSCMCredential |
                         AuthenticationSSPI => {
-                            let err =
-                                IoError::new(ErrorKind::Other,
-                                             "Unsupported authentication type requested");
+                            let err = IoError::new(ErrorKind::Other,
+                                                   "Unsupported authentication type requested");
                             future::Either::A(Err(err).into_future())
                         }
                         ErrorResponse { fields } => {
@@ -324,8 +323,8 @@ impl AuthParams {
                         }
                         ReadyForQuery { .. } => future::Either::A(Ok((true, conn)).into_future()),
                         _ => {
-                            let err =
-                                IoError::new(ErrorKind::Other, "Unexpected message from backend");
+                            let err = IoError::new(ErrorKind::Other,
+                                                   "Unexpected message from backend");
                             future::Either::A(Err(err).into_future())
                         }
                     }
