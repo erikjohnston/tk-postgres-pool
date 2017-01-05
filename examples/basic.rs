@@ -16,10 +16,13 @@ use tokio_postgres::{ConnectionFactory, ConnectionPool, FrontendMessage,
 fn main() {
     env_logger::init().unwrap();
 
+    let args: Vec<_> = std::env::args().collect();
+    let password = args.get(1).expect("expected password to be supplied");
+
     let mut core = tokio_core::reactor::Core::new().unwrap();
 
     let conn_fac = TcpConnectionFactory::new("127.0.0.1:5432".parse().unwrap(), core.handle());
-    let pg_fac = IoPostgresConnectionFactory::new(conn_fac, "erikj", "foxmoose");
+    let pg_fac = IoPostgresConnectionFactory::new(conn_fac, "erikj", &password[..]);
 
     let mut client = ConnectionPool::spawn(pg_fac, core.handle());
 
