@@ -20,7 +20,7 @@ fn main() {
     let mut core = tokio_core::reactor::Core::new().unwrap();
 
     let conn_fac = TcpConnectionFactory::new("127.0.0.1:5432".parse().unwrap(), core.handle());
-    let pg_fac = IoPostgresConnectionFactory::new(conn_fac, "erikj", &password[..]);
+    let pg_fac = IoPostgresConnectionFactory::new(conn_fac, "erikj", &password[..], None);
 
     let mut client = ConnectionPool::spawn(pg_fac, core.handle());
 

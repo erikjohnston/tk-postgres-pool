@@ -212,18 +212,21 @@ pub struct IoPostgresConnectionFactory<C> {
     conn_fac: C,
     username: String,
     password: String,
+    database: Option<String>,
 }
 
 impl<C> IoPostgresConnectionFactory<C> {
     pub fn new<U: Into<String>, P: Into<String>>(
         conn_fac: C,
         username: U,
-        password: P
+        password: P,
+        database: Option<String>,
     ) -> IoPostgresConnectionFactory<C> {
         IoPostgresConnectionFactory {
             conn_fac: conn_fac,
             username: username.into(),
             password: password.into(),
+            database: database,
         }
     }
 }
@@ -242,6 +245,7 @@ impl<C> ConnectionFactory for IoPostgresConnectionFactory<C>
         let auth_params = AuthParams {
             username: self.username.clone(),
             password: self.password.clone(),
+            database: self.database.clone(),
         };
 
         let fut = self.conn_fac
@@ -266,6 +270,7 @@ impl<C> ConnectionFactory for IoPostgresConnectionFactory<C>
 pub struct AuthParams {
     username: String,
     password: String,
+    database: Option<String>,
 }
 
 impl AuthParams {
@@ -274,8 +279,16 @@ impl AuthParams {
         where T: Sink<SinkItem=FrontendMessage, SinkError=IoError>
             + Stream<Item=BackendMessage, Error=IoError>
     {
+        let mut params = vec![
+            ("user".into(), self.username.clone()),
+        ];
+
+        if let Some(ref database) = self.database {
+            params.push(("database".into(), database.clone()));
+        }
+
         let startup = FrontendMessage::StartupMessage {
-            parameters: vec![("user".into(), self.username.clone())],
+            parameters: params,
         };
         conn.send(startup)
             .and_then(move |conn| {
@@ -436,6 +449,7 @@ mod tests {
                 let auth_params = AuthParams {
                     username: "foo".into(),
                     password: "bar".into(),
+                    database: None,
                 };
 
                 let (conn, backing) = create_conn();
@@ -472,6 +486,7 @@ mod tests {
                 let auth_params = AuthParams {
                     username: "foo".into(),
                     password: "bar".into(),
+                    database: None,
                 };
 
                 let (conn, backing) = create_conn();
