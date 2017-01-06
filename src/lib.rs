@@ -149,6 +149,12 @@ impl<C> ConnectionPool<C>
         let pos_opt = self.connections.iter().position(|conn| conn.pending_queries() < 5);
         if let Some(pos) = pos_opt {
             let mut conn = self.connections.swap_remove(pos);
+
+            if conn.pending_queries() > 1 && self.connections.len() + self.new_connections.len() < 5 {
+                let fut = self.connection_factory.connect();
+                self.new_connections.push(fut);
+            }
+
             match conn.send_query(query) {
                 Ok(()) => self.connections.push(conn),
                 Err(_) => {} // TODO: Report error.
